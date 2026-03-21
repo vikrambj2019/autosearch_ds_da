@@ -29,7 +29,7 @@ Dexter uses a two-step approach designed so the AI never makes up numbers:
 1. **Python computes everything.** All statistics, comparisons, and model scores are calculated by deterministic Python code — not by the AI.
 2. **The AI only writes the narrative.** Once the numbers are ready, the AI reads the pre-computed results and writes the English report. It cannot get the numbers wrong because it doesn't produce them.
 
-For model building, Dexter uses a **self-improving autoresearch loop** — it runs multiple rounds of experimentation automatically. Each round, the AI proposes one change to the model, Dexter tests it, and keeps it only if performance improves. If not, it discards the change and tries something else. This continues until the model reaches a quality threshold or stops improving — no human in the loop required.
+For model building, Dexter uses a **self-improving autoresearch loop** — inspired by [Andrej Karpathy's autoresearch](https://github.com/karpathy/autoresearch). It runs multiple rounds of experimentation automatically. Each round, the AI proposes one change to the model, Dexter tests it, and keeps it only if performance improves. If not, it discards the change and tries something else. This continues until the model reaches a quality threshold or stops improving — no human in the loop required.
 
 ---
 

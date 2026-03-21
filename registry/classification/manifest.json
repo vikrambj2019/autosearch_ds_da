@@ -1,0 +1,40 @@
+{
+  "name": "classification",
+  "version": "1.0",
+  "description": "Builds binary classification models — data profiling, preprocessing, model training (LightGBM/XGBoost/RF), evaluation, and SHAP explainability.",
+  "category": "ml",
+
+  "routing": {
+    "trigger_phrases": [
+      "build a model", "classification", "classify", "predict",
+      "train a model", "build me", "machine learning",
+      "binary", "target variable", "high cost",
+      "model predicting", "logistic", "random forest",
+      "lightgbm", "xgboost", "gradient boosting"
+    ]
+  },
+
+  "tools_needed": [
+    "mcp__data__profile_data",
+    "mcp__data__validate_cols",
+    "mcp__ml__run_pipeline",
+    "mcp__ml__score_metrics"
+  ],
+
+  "has_template": true,
+  "has_self_improvement": true,
+
+  "scoring": {
+    "weights": {
+      "auc": 0.45,
+      "f1": 0.20,
+      "speed": 0.10,
+      "shap_coverage": 0.10,
+      "llm_explainability": 0.15
+    },
+    "threshold": 0.65,
+    "max_improvement_rounds": 3
+  },
+
+  "model": "sonnet"
+}

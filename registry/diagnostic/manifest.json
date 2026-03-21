@@ -1,0 +1,60 @@
+{
+  "name": "diagnostic",
+  "version": "1.0",
+  "description": "Answers 'why did it happen?' questions \u2014 correlations, statistical tests, anomaly detection, group comparisons, and transition analysis",
+  "category": "analytics",
+  "routing": {
+    "trigger_phrases": [
+      "why",
+      "correlation",
+      "correlated",
+      "significant",
+      "significance",
+      "change",
+      "transition",
+      "anomaly",
+      "outlier",
+      "spike",
+      "drop",
+      "exceeds",
+      "exceeding",
+      "despite",
+      "volatility",
+      "variance",
+      "difference",
+      "compared",
+      "compare",
+      "between",
+      "vs",
+      "driver",
+      "driving",
+      "cause",
+      "impact",
+      "effect"
+    ]
+  },
+  "tools_needed": [
+    "mcp__data__profile_data",
+    "mcp__data__validate_cols",
+    "mcp__data__distribution",
+    "mcp__data__trend",
+    "mcp__data__comparison",
+    "mcp__data__correlation",
+    "mcp__data__summary",
+    "mcp__data__entity_counts"
+  ],
+  "has_template": false,
+  "has_self_improvement": true,
+  "scoring": {
+    "weights": {
+      "completeness": 0.2,
+      "depth": 0.3,
+      "context": 0.2,
+      "actionability": 0.2,
+      "data_quality": 0.1
+    },
+    "threshold": 0.7,
+    "max_improvement_rounds": 2
+  },
+  "model": "sonnet"
+}

@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multi-Agent Analytics System — Architecture</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f1117; color: #e2e8f0; padding: 32px;
+    }
+    h1 { font-size: 28px; font-weight: 700; color: #f8fafc; margin-bottom: 8px; letter-spacing: -0.5px; }
+    .subtitle { color: #94a3b8; font-size: 14px; margin-bottom: 48px; }
+    .section { margin-bottom: 56px; }
+    .section-title {
+      font-size: 18px; font-weight: 600; color: #cbd5e1;
+      margin-bottom: 6px; padding-bottom: 8px; border-bottom: 1px solid #1e293b;
+    }
+    .section-desc { color: #64748b; font-size: 13px; margin-bottom: 20px; }
+    .diagram-box {
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: 12px; padding: 28px; overflow-x: auto;
+    }
+    .mermaid { display: flex; justify-content: center; }
+    .legend {
+      display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px;
+      padding: 16px; background: #0f172a; border-radius: 8px; border: 1px solid #1e293b;
+    }
+    .legend-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #94a3b8; }
+    .legend-color { width: 14px; height: 14px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+  <h1>Multi-Agent Analytics System</h1>
+  <p class="subtitle">Natural language analytics platform built on the Claude Agent SDK — 2-pass deterministic architecture + ML autoresearch loop</p>
+
+  <!-- 1. System Overview -->
+  <div class="section">
+    <div class="section-title">1 · System Overview</div>
+    <p class="section-desc">Top-level view of all major layers: CLI entry point, routing, analytics engine, ML workflow, and output.</p>
+    <div class="diagram-box">
+      <div class="mermaid">
+graph TB
+    CLI["CLI\norchestrator.py\n--data CSV + question"]
+    ROUTER["Question Router\nagents/definitions.py\nskill discovery"]
+    PROFILE["Data Profiler\nDetect grain: panel vs cross-sectional\nExtract params: columns + periods"]
+    ANALYTICS["2-Pass Analytics Engine\nPass 1: Primary analysis\nPass 2: 2 depth analyses"]
+    ML["ML Autoresearch Loop\nRound-based code generation\nKeep or discard per round"]
+    NARRATE["Narrator LLM\nSingle LLM call\nJSON results to English report"]
+    OUTPUT["Output\noutput/ timestamped markdown"]
+    SAFETY["Safety Hook\nhooks/safety.py\nPreToolUse Bash guardrails"]
+
+    CLI --> ROUTER
+    ROUTER -->|analytics| PROFILE
+    ROUTER -->|classification| ML
+    PROFILE --> ANALYTICS
+    ANALYTICS --> NARRATE
+    ML --> NARRATE
+    NARRATE --> OUTPUT
+    SAFETY -.->|guards all tool calls| ANALYTICS
+    SAFETY -.->|guards all tool calls| ML
+
+    style CLI fill:#1e40af,stroke:#3b82f6,color:#fff
+    style ROUTER fill:#7c3aed,stroke:#8b5cf6,color:#fff
+    style PROFILE fill:#1c1917,stroke:#78716c,color:#fff
+    style ANALYTICS fill:#1c1917,stroke:#78716c,color:#fff
+    style ML fill:#1c1917,stroke:#78716c,color:#fff
+    style NARRATE fill:#7c3aed,stroke:#8b5cf6,color:#fff
+    style OUTPUT fill:#065f46,stroke:#10b981,color:#fff
+    style SAFETY fill:#7f1d1d,stroke:#ef4444,color:#fff
+      </div>
+    </div>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-color" style="background:#1e40af;border:1px solid #3b82f6"></div>Entry / CLI</div>
+      <div class="legend-item"><div class="legend-color" style="background:#7c3aed;border:1px solid #8b5cf6"></div>LLM / AI / Agent</div>
+      <div class="legend-item"><div class="legend-color" style="background:#065f46;border:1px solid #10b981"></div>Output / Success</div>
+      <div class="legend-item"><div class="legend-color" style="background:#7f1d1d;border:1px solid #ef4444"></div>Safety / Guardrails</div>
+      <div class="legend-item"><div class="legend-color" style="background:#1c1917;border:1px solid #78716c"></div>Compute / Infrastructure</div>
+    </div>
+  </div>
+
+  <!-- 2. Question Routing -->
+  <div class="section">
+    <div class="section-title">2 · Question Routing and Skill Registry</div>
+    <p class="section-desc">How a natural language question is classified and dispatched to the appropriate skill from the registry.</p>
+    <div class="diagram-box">
+      <div class="mermaid">
+flowchart TD
+    Q["Natural Language Question"]
+    SD["Skill Discovery\nagents/definitions.py\nload registry manifests"]
+    RT{"Route\nQuestion Type"}
+    DESC["Descriptive Skill\nregistry/descriptive/\nWhat happened?"]
+    DIAG["Diagnostic Skill\nregistry/diagnostic/\nWhy did it happen?"]
+    CLASS["Classification Skill\nregistry/classification/\nBuild ML model"]
+    CRITIC["Critic\nregistry/critic/\nSanity check + follow-ups"]
+    REP["Reporter\nregistry/reporter/\nInsight compilation"]
+    EVAL["Evaluator\nregistry/evaluator/\nLLM-as-judge scoring"]
+
+    Q --> SD
+    SD --> RT
+    RT -->|distribution / trend / count| DESC
+    RT -->|comparison / significance| DIAG
+    RT -->|predict / model / classify| CLASS
+    CLASS --> CRITIC
+    CLASS --> REP
+    CLASS --> EVAL
+
+    style Q fill:#1e40af,stroke:#3b82f6,color:#fff
+    style SD fill:#7c3aed,stroke:#8b5cf6,color:#fff
+    style RT fill:#1c1917,stroke:#78716c,color:#fff
+    style DESC fill:#1c1917,stroke:#78716c,color:#fff
+    style DIAG fill:#1c1917,stroke:#78716c,color:#fff
+    style CLASS fill:#1c1917,stroke:#78716c,color:#fff
+    style CRITIC fill:#7c3aed,stroke:#8b5cf6,color:#fff
+    style REP fill:#7c3aed,stroke:#8b5cf6,color:#fff
+    style EVAL fill:#7c3aed,stroke:#8b5cf6,color:#fff
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. 2-Pass Analytics Engine -->
+  <div class="section">
+    <div class="section-title">3 · 2-Pass Deterministic Analytics Engine</div>
+    <p class="section-desc">Every number is computed by Python — the LLM only writes narrative from pre-computed JSON results including a pre-computed direction field.</p>
+    <div class="diagram-box">
+      <div class="mermaid">
+sequenceDiagram
+    participant U as User Question
+    participant O as Orchestrator
+    participant P as Param Extractor LLM
+    participant A as analytics.py Python
+    participant N as Narrator LLM
+    participant Out as Output File
+
+    U->>O: question + CSV path
+    O->>O: profile data, detect grain
+    O->>P: extract columns, periods, filters
+    P-->>O: resolved params
+
+    Note over O,A: Pass 1 - Primary Analysis
+    O->>A: call primary function
+    A-->>O: JSON result with direction field
+
+    Note over O,A: Pass 2 - Depth Analyses, rule-based selection
+    O->>A: depth analysis 1
+    A-->>O: JSON result
+    O->>A: depth analysis 2
+    A-->>O: JSON result
+
+    O->>N: all JSON results + company context
+    N-->>O: English narrative report
+    O->>Out: save timestamped markdown
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Analytics Functions -->
+  <div class="section">
+    <div class="section-title">4 · Deterministic Analytics Layer</div>
+    <p class="section-desc">The 7 grain-aware functions in tools/analytics.py — each handles automatic panel collapse for entity x time data.</p>
+    <div class="diagram-box">
+      <div class="mermaid">
+graph LR
+    subgraph IN["Input"]
+        DF["DataFrame\npanel or cross-sectional"]
+    end
+
+    subgraph FUNCS["tools/analytics.py"]
+        F1["distribution_by_category\nPareto bucketing\n95pct of value or top 10"]
+        F2["trend_over_time\nTime series + regression\noptional stratify_by"]
+        F3["group_comparison\nt-test, Mann-Whitney\nCohen's d effect size"]
+        F4["correlation_analysis\nPearson and Spearman\nwith significance"]
+        F5["summary_stats\nPercentiles, skewness\nzero pct, total"]
+        F6["entity_counts\nUnique entities\noptionally grouped"]
+        F7["period_comparison\nEntity-level diff\nauto driver analysis"]
+    end
+
+    subgraph OUT2["Output"]
+        JSON["JSON result\nwith comparison.direction\npre-computed"]
+    end
+
+    DF --> F1 & F2 & F3 & F4 & F5 & F6 & F7
+    F1 & F2 & F3 & F4 & F5 & F6 & F7 --> JSON
+
+    style DF fill:#1e40af,stroke:#3b82f6,color:#fff
+    style JSON fill:#065f46,stroke:#10b981,color:#fff
+    style F1 fill:#1c1917,stroke:#78716c,color:#fff
+    style F2 fill:#1c1917,stroke:#78716c,color:#fff
+    style F3 fill:#1c1917,stroke:#78716c,color:#fff
+    style F4 fill:#1c1917,stroke:#78716c,color:#fff
+    style F5 fill:#1c1917,stroke:#78716c,color:#fff
+    style F6 fill:#1c1917,stroke:#78716c,color:#fff
+    style F7 fill:#1c1917,stroke:#78716c,color:#fff
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. ML Autoresearch Loop -->
+  <div class="section">
+    <div class="section-title">5 · ML Autoresearch Loop</div>
+    <p class="section-desc">Inspired by karpathy/autoresearch: the orchestrator controls keep/discard logic; the agent generates code but never executes it.</p>
+    <div class="diagram-box">
+      <div class="mermaid">
+flowchart TD
+    START["Classification Question + CSV"]
+    R1["Round 1\nAgent profiles data\ngenerates baseline pipeline code"]
+    RUN["Orchestrator runs pipeline\ncomputes composite_score"]
+    CHECK{"score >= 0.65\nor plateau\nor round 6?"}
+    IMPROVE["Next Round\nAgent sees best code + experiment log\nmakes ONE change"]
+    KEEP{"Better than\nbest score?"}
+    KEEPIT["KEEP change\nupdate best code"]
+    DISCARD["DISCARD change\nrevert to best code"]
+    NARRATE2["Narrator LLM\nwrites final report\nfrom experiment log"]
+    DONE["Output Report\noutput/ markdown"]
+
+    START --> R1
+    R1 --> RUN
+    RUN --> CHECK
+    CHECK -->|no| IMPROVE
+    IMPROVE --> RUN
+    RUN --> KEEP
+    KEEP -->|yes| KEEPIT
+    KEEP -->|no| DISCARD
+    KEEPIT --> CHECK
+    DISCARD --> CHECK
+    CHECK -->|yes| NARRATE2
+    NARRATE2 --> DONE
+
+    style START fill:#1e40af,stroke:#3b82f6,color:#fff
+    style R1 fill:#7c3aed,stroke:#8b5cf6,color:#fff
+    style RUN fill:#1c1917,stroke:#78716c,color:#fff
+    style CHECK fill:#1c1917,stroke:#78716c,color:#fff
+    style IMPROVE fill:#7c3aed,stroke:#8b5cf6,color:#fff
+    style KEEP fill:#1c1917,stroke:#78716c,color:#fff
+    style KEEPIT fill:#065f46,stroke:#10b981,color:#fff
+    style DISCARD fill:#7f1d1d,stroke:#ef4444,color:#fff
+    style NARRATE2 fill:#7c3aed,stroke:#8b5cf6,color:#fff
+    style DONE fill:#065f46,stroke:#10b981,color:#fff
+      </div>
+    </div>
+  </div>
+
+  <!-- 6. MCP Server and Tool Architecture -->
+  <div class="section">
+    <div class="section-title">6 · MCP Server and Tool Architecture</div>
+    <p class="section-desc">How agents communicate with data and ML tools via MCP servers — company context is injected into all agent prompts.</p>
+    <div class="diagram-box">
+      <div class="mermaid">
+graph TB
+    subgraph AGENTS["Agents (Claude Agent SDK)"]
+        DA["Descriptive Agent"]
+        DIA["Diagnostic Agent"]
+        MLA["ML Agent"]
+    end
+
+    subgraph SERVERS["MCP Servers (tools/servers.py)"]
+        DS["Data Server"]
+        MS["ML Server"]
+    end
+
+    subgraph DATA_TOOLS["tools/data_tools.py"]
+        T1["profile\ndetect grain, schema"]
+        T2["run_code\nexecute Python snippet"]
+        T3["validate_cols\ncheck column names"]
+        T4["analytics\ncall analytics.py functions"]
+    end
+
+    subgraph ML_TOOLS["tools/ml_tools.py"]
+        T5["run_pipeline\nexecute generated ML code"]
+        T6["score_metrics\ncompute composite_score"]
+    end
+
+    subgraph CONTEXT["Company Context"]
+        DK["domain_knowledge.md"]
+        MD["metrics_definitions.md"]
+    end
+
+    DA & DIA --> DS
+    MLA --> DS & MS
+    DS --> T1 & T2 & T3 & T4
+    MS --> T5 & T6
+    DK & MD -.->|injected into prompts| DA & DIA & MLA
+
+    style DA fill:#7c3aed,stroke:#8b5cf6,color:#fff
+    style DIA fill:#7c3aed,stroke:#8b5cf6,color:#fff
+    style MLA fill:#7c3aed,stroke:#8b5cf6,color:#fff
+    style DS fill:#1c1917,stroke:#78716c,color:#fff
+    style MS fill:#1c1917,stroke:#78716c,color:#fff
+    style T1 fill:#1c1917,stroke:#78716c,color:#fff
+    style T2 fill:#1c1917,stroke:#78716c,color:#fff
+    style T3 fill:#1c1917,stroke:#78716c,color:#fff
+    style T4 fill:#1c1917,stroke:#78716c,color:#fff
+    style T5 fill:#1c1917,stroke:#78716c,color:#fff
+    style T6 fill:#1c1917,stroke:#78716c,color:#fff
+    style DK fill:#065f46,stroke:#10b981,color:#fff
+    style MD fill:#065f46,stroke:#10b981,color:#fff
+      </div>
+    </div>
+  </div>
+
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: 'dark',
+      themeVariables: {
+        primaryColor: '#1e293b', primaryTextColor: '#e2e8f0',
+        primaryBorderColor: '#475569', lineColor: '#64748b',
+        secondaryColor: '#0f172a', tertiaryColor: '#1e293b',
+        background: '#0f1117', mainBkg: '#1e293b',
+        nodeBorder: '#475569', clusterBkg: '#0f172a',
+        titleColor: '#f8fafc', edgeLabelBackground: '#1e293b',
+      },
+      flowchart: { curve: 'basis', padding: 20 },
+      sequence: { actorMargin: 60 },
+    });
+  </script>
+</body>
+</html>

@@ -1,8 +1,8 @@
-# Dexter — AI Analytics Assistant for Healthcare Cost Data
+# Dexter — AI Analytics Assistant for Any  Data
 
 Ask a question in plain English. Get a full analytics report in seconds.
 
-Dexter is an AI-powered analytics system built for healthcare cost analysis. It connects directly to your data, runs rigorous statistical analysis, and writes a clear report — no dashboards to navigate, no SQL to write, no analyst queue to join.
+Dexter is an AI-powered analytics system built for various analysis. It connects directly to your data, runs rigorous statistical analysis, and writes a clear report — no dashboards to navigate, no SQL to write, no analyst queue to join.
 
 ---
 

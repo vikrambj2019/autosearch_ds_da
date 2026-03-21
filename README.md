@@ -29,7 +29,17 @@ Dexter uses a two-step approach designed so the AI never makes up numbers:
 1. **Python computes everything.** All statistics, comparisons, and model scores are calculated by deterministic Python code — not by the AI.
 2. **The AI only writes the narrative.** Once the numbers are ready, the AI reads the pre-computed results and writes the English report. It cannot get the numbers wrong because it doesn't produce them.
 
-For model building, Dexter uses a **self-improving autoresearch loop** — inspired by [Andrej Karpathy's autoresearch](https://github.com/karpathy/autoresearch). It runs multiple rounds of experimentation automatically. Each round, the AI proposes one change to the model, Dexter tests it, and keeps it only if performance improves. If not, it discards the change and tries something else. This continues until the model reaches a quality threshold or stops improving — no human in the loop required.
+For model building, Dexter uses a **self-improving autoresearch loop** — inspired by [Andrej Karpathy's autoresearch](https://github.com/karpathy/autoresearch).
+
+Here is how it works:
+
+- **Round 1** — The AI reads your data schema and writes a baseline classification model pipeline from scratch.
+- **Rounds 2–6** — The AI sees the best pipeline so far plus a log of every previous experiment. It makes exactly **one targeted change** — for example, switching from Random Forest to LightGBM, or adding feature selection. Dexter runs the new pipeline, scores it, and decides: keep the change if it improved, discard it if it did not.
+- **Stops automatically** when the model hits a quality threshold, stops improving for two rounds in a row, or reaches 6 rounds.
+
+Each model is scored on five dimensions: prediction accuracy (AUC), precision-recall balance (F1), training speed, how well the top features explain the model (SHAP coverage), and how interpretable the results are to a non-technical audience.
+
+The AI proposes changes but **never decides what to keep** — that is always Dexter's job. This means experiments are consistent, reproducible, and the log clearly shows what each round changed and whether it helped.
 
 ---
 

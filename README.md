@@ -24,7 +24,7 @@ Think of it as a data scientist who doesn't just answer the question on the slid
 
 ---
 
-## Two Things We Did Differently
+## Two Things I Did Differently
 
 ### 1. We gave the AI working code, not a blank page
 

@@ -1,37 +1,50 @@
-# Dexter — AI Analytics Assistant for Any  Data
+# Dexter — Your AI Data Scientist and Analyst
 
-Ask a question in plain English. Get a full analytics report in seconds.
+Hand Dexter a spreadsheet and a question. It answers you — and then tells you what you didn't think to ask.
 
-Dexter is an AI-powered analytics system built for various analysis. It connects directly to your data, runs rigorous statistical analysis, and writes a clear report — no dashboards to navigate, no SQL to write, no analyst queue to join.
-
----
-
-## What It Does
-
-You type a question. Dexter figures out what analysis to run, runs it correctly on your data, and hands you back a written report with tables, statistics, and a clear narrative.
-
-**Examples of questions you can ask:**
-
-| Question | What Dexter does |
-|---|---|
-| "What is the distribution of monthly cost by active status?" | Breaks down cost across member groups with statistical significance testing |
-| "Is there a significant difference in cost between male and female members?" | Runs t-test, Mann-Whitney U, and Cohen's d effect size |
-| "How have costs trended from July to September?" | Time series analysis with regression stats |
-| "Compare July vs September costs — who drove the change?" | Entity-level diff, auto driver analysis across all categories, top movers |
-| "Build me a model predicting high-cost members" | Trains and iteratively improves a classification model, reports AUC and key drivers |
+No SQL. No dashboards. No waiting for an analyst.
 
 ---
 
-## How It Works
+## What Dexter Does
 
-Dexter uses a two-step approach designed so the AI never makes up numbers:
+Ask Dexter a question in plain English. It runs the analysis, writes a clear report, and automatically goes one level deeper.
 
-1. **Python computes everything.** All statistics, comparisons, and model scores are calculated by deterministic Python code — not by the AI.
-2. **The AI only writes the narrative.** Once the numbers are ready, the AI reads the pre-computed results and writes the English report. It cannot get the numbers wrong because it doesn't produce them.
+**You ask:** *"Did costs go up this month?"*
+**Dexter answers that — and surfaces:** which member groups drove the increase, which counties contributed the most, and who the top movers were.
 
-For model building, Dexter uses a **self-improving autoresearch loop** — inspired by [Andrej Karpathy's autoresearch](https://github.com/karpathy/autoresearch).
+Think of it as a data scientist who doesn't just answer the question on the slide — they come back with the three follow-up slides you didn't know you needed.
 
-Here is how it works:
+**Ask Dexter things like:**
+- *"What is the breakdown of costs by member status?"*
+- *"Is there a significant difference between male and female members?"*
+- *"How have costs trended from July to September?"*
+- *"Compare this month to last month — what changed and why?"*
+- *"Build me a model to predict which members will be high-cost next year"*
+
+---
+
+## Two Things We Did Differently
+
+### 1. We gave the AI working code, not a blank page
+
+Most data science work is procedural — 80% of it follows the same patterns every time. The real insight lives in the last 20%, where you dig into the right question in the right way.
+
+We wrote that 80% ourselves: a set of tested, reliable Python functions — one for distributions, one for trends, one for group comparisons, one for period-over-period change. When Dexter runs an analysis, it starts from code that already works. The AI applies it intelligently to your question — it doesn't invent analysis from scratch.
+
+This was the breakthrough. Earlier versions asked the AI to write analysis code from a blank slate. It kept breaking. Handing it working code as a starting point changed everything.
+
+### 2. We profile your data before we touch your question
+
+Before Dexter reads your question, it reads your data. It checks what columns exist, what they contain, flags any data quality issues, and figures out how the data is structured — one row per person, or one row per person per month?
+
+Only then does it match your question to the right columns. This means Dexter understands what you're asking — "gender" maps to the right column even if the file calls it `SEX`. And when something breaks, we know exactly which column, which step, and why — not a cryptic error halfway through.
+
+---
+
+## The Self-Improving Model Builder
+
+Ask Dexter to build a predictive model and it doesn't stop at one pass. It runs multiple rounds of improvement automatically — inspired by [Andrej Karpathy's autoresearch](https://github.com/karpathy/autoresearch).
 
 - **Round 1** — The AI reads your data schema and writes a baseline classification model pipeline from scratch.
 - **Rounds 2–6** — The AI sees the best pipeline so far plus a log of every previous experiment. It makes exactly **one targeted change** — for example, switching from Random Forest to LightGBM, or adding feature selection. Dexter runs the new pipeline, scores it, and decides: keep the change if it improved, discard it if it did not.
@@ -43,54 +56,32 @@ The AI proposes changes but **never decides what to keep** — that is always De
 
 ---
 
-## What It Knows About Your Data
+## Other Clever Things Under the Hood
 
-Dexter is pre-loaded with context about healthcare cost analytics:
+### The AI never gets the direction wrong
 
-- How to handle **panel data** (members observed across multiple months) without averaging incorrectly
-- That cost distributions are **right-skewed** — median is more meaningful than mean for most questions
-- That **active vs inactive members** have different profiles and should be segmented
-- That **top 5% of members often account for 40–60% of total spend**
-- That ER costs are episodic and county-level variation reflects network differences, not health status
+Every comparison result — "Group A is higher than Group B by 23%" — is computed by Python before the AI ever sees it. The AI is told to copy that sentence verbatim, not re-derive it. In earlier versions, the AI would sometimes report the wrong group as higher. This eliminates that entirely.
 
----
+### High-value segments never get buried
 
-## Sample Output
+When a column has dozens of categories (like County with 50+ values), most systems just show "top 10 by count" and lump the rest into "Other." Dexter uses a smarter rule: keep whichever categories cover 95% of total spend, or top 10 by count — whichever shows more. A county with 50 members but 30% of total cost will never disappear into "Other."
 
-> *"Across 334 unique members observed over 3 monthly periods (July–September 2025), average monthly healthcare costs are nearly identical between active and inactive members. The gap is statistically negligible — enrollment status alone does not meaningfully differentiate cost levels in this panel.*
->
-> *Active members account for 92.3% of total spend ($1.16M of $1.26M overall), simply by virtue of representing 308 of the 334 members. While the means are close, the inactive group has a notably higher median ($958 vs $883), suggesting the active group has a longer right tail. Two independent statistical tests confirm no significant difference: Welch's t-test p = 0.89, Mann-Whitney p = 0.85, Cohen's d = 0.016 (negligible effect)."*
+### Panel data is handled correctly
 
-Reports include tables, statistical test results, effect sizes, and follow-up analyses — all generated automatically.
+When the same person appears across multiple months, averaging their monthly averages gives you the wrong number. Dexter always divides total sum by total observations — the statistically correct approach — not the common shortcut that quietly introduces error.
 
----
+### If the AI hallucinates a column name, Dexter catches it
 
-## Types of Analysis
-
-| Type | When to use |
-|---|---|
-| **Descriptive** | Distributions, breakdowns, counts, trends over time |
-| **Diagnostic** | Group comparisons, significance testing, correlation |
-| **Period Comparison** | Month-over-month or period-over-period change with driver analysis |
-| **Predictive (ML)** | Classification models to identify high-cost or high-risk members |
-
----
-
-## Data It Works With
-
-- **Panel data** — members observed across multiple time periods (e.g. monthly snapshots)
-- **Cross-sectional data** — one row per member
-- Input format: CSV files
-
-Dexter auto-detects which type of data you've provided and adjusts all analysis accordingly.
+When Dexter matches your question to columns in your data, the AI sometimes returns a column name that doesn't exist. Dexter validates every column name before using it and falls back to a sensible default if the AI got it wrong. The analysis continues — it never crashes silently with bad data.
 
 ---
 
 ## Guardrails
 
-- The AI never executes arbitrary code on your system — all tool calls go through a safety layer
-- The AI never computes numbers — only Python does
-- All reports are saved with timestamps to the `output/` folder for auditability
+- Python computes every number in the report — the AI only writes the narrative
+- Your data stays on your machine
+- Every report saves with a timestamp for auditability
+- A safety layer blocks the AI from deleting files, making network calls, or running dangerous system commands
 
 ---
 

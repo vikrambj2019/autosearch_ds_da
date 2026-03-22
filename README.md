@@ -70,6 +70,14 @@ When a column has dozens of categories (like County with 50+ values), most syste
 
 When the same person appears across multiple months, averaging their monthly averages gives you the wrong number. Dexter always divides total sum by total observations — the statistically correct approach — not the common shortcut that quietly introduces error.
 
+### Every answer automatically comes with two follow-up analyses
+
+Dexter never stops at just answering your question. After the primary analysis, it automatically runs two follow-up analyses based on what it just found — no prompting needed. Ask about a distribution, and Dexter also runs a significance test and breaks it down by a second dimension. Ask about a trend, and it also shows you summary statistics and a segment breakdown. The follow-ups are chosen by rule, not by the AI, so they are consistent and fast every time.
+
+### When you ask "what changed?", Dexter scans every column to find out why
+
+For period-over-period comparisons (July vs September, this month vs last), Dexter doesn't just tell you the total change. It automatically loops through every categorical column in your data — gender, county, product, region, whatever you have — and computes each segment's contribution to the change. It then ranks them and surfaces only the ones that matter. Nobody told Dexter which columns to look at. It finds the drivers on its own.
+
 ### If the AI hallucinates a column name, Dexter catches it
 
 When Dexter matches your question to columns in your data, the AI sometimes returns a column name that doesn't exist. Dexter validates every column name before using it and falls back to a sensible default if the AI got it wrong. The analysis continues — it never crashes silently with bad data.

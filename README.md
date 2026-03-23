@@ -1,100 +1,209 @@
-# Dexter — Your AI Data Scientist and Analyst
+# Dexter
 
-Hand Dexter a spreadsheet and a question. It answers you — and then tells you what you didn't think to ask.
+### The AI Data Scientist That Doesn't Stop at the First Answer
 
-No SQL. No dashboards. No waiting for an analyst.
+> Most tools answer your question.
+> **Dexter tells you what you should have asked next.**
 
 ---
 
-## What Dexter Does
+## The Problem
 
-Ask Dexter a question in plain English. It runs the analysis, writes a clear report, and automatically goes one level deeper.
+Every organization is drowning in data — but insight is still slow.
 
-**You ask:** *"Did costs go up this month?"*
-**Dexter answers that — and surfaces:** which member groups drove the increase, which counties contributed the most, and who the top movers were.
+- Analysts are bottlenecks
+- Dashboards answer predefined questions only
+- AI tools generate fragile, unreliable analysis
+- Decision-makers don't know what to ask next
 
-Think of it as a data scientist who doesn't just answer the question on the slide — they come back with the three follow-up slides you didn't know you needed.
-
-**Ask Dexter things like:**
-- *"What is the breakdown of costs by member status?"*
-- *"Is there a significant difference between male and female members?"*
-- *"How have costs trended from July to September?"*
-- *"Compare this month to last month — what changed and why?"*
-- *"Build me a model to predict which members will be high-cost next year"*
+> The gap isn't access to data.
+> It's **depth of insight and speed of iteration.**
 
 ---
 
 ## Two Things I Did Differently
 
-### 1. We gave the AI working code, not a blank page
+Even the most advanced commercial AI models struggle with real-world data analysis:
 
-Most data science work is procedural — 80% of it follows the same patterns every time. The real insight lives in the last 20%, where you dig into the right question in the right way.
+- Write inconsistent or non-reproducible code
+- Misinterpret schemas and column mappings
+- Perform incorrect statistical calculations
+- Lose track of logic across multi-step analysis
+- Hallucinate columns or metrics that don't exist
+- Stop at surface-level answers
 
-We wrote that 80% ourselves: a set of tested, reliable Python functions — one for distributions, one for trends, one for group comparisons, one for period-over-period change. When Dexter runs an analysis, it starts from code that already works. The AI applies it intelligently to your question — it doesn't invent analysis from scratch.
-
-This was the breakthrough. Earlier versions asked the AI to write analysis code from a blank slate. It kept breaking. Handing it working code as a starting point changed everything.
-
-### 2. We profile your data before we touch your question
-
-Before Dexter reads your question, it reads your data. It checks what columns exist, what they contain, flags any data quality issues, and figures out how the data is structured — one row per person, or one row per person per month?
-
-Only then does it match your question to the right columns. This means Dexter understands what you're asking — "gender" maps to the right column even if the file calls it `SEX`. And when something breaks, we know exactly which column, which step, and why — not a cryptic error halfway through.
+> These models are powerful for language —
+> but **data analysis requires structure, determinism, and correctness.**
 
 ---
 
-## The Self-Improving Model Builder
+## Model Comparison (Coming Soon)
 
-Ask Dexter to build a predictive model and it doesn't stop at one pass. It runs multiple rounds of improvement automatically — inspired by [Andrej Karpathy's autoresearch](https://github.com/karpathy/autoresearch).
+We benchmarked Dexter against leading AI models on real-world datasets.
 
-- **Round 1** — The AI reads your data schema and writes a baseline classification model pipeline from scratch.
-- **Rounds 2–6** — The AI sees the best pipeline so far plus a log of every previous experiment. It makes exactly **one targeted change** — for example, switching from Random Forest to LightGBM, or adding feature selection. Dexter runs the new pipeline, scores it, and decides: keep the change if it improved, discard it if it did not.
-- **Stops automatically** when the model hits a quality threshold, stops improving for two rounds in a row, or reaches 6 rounds.
+Detailed comparisons will be available here: **`comparison.html` (to be added)**
 
-Each model is scored on five dimensions: prediction accuracy (AUC), precision-recall balance (F1), training speed, how well the top features explain the model (SHAP coverage), and how interpretable the results are to a non-technical audience.
+This will include:
 
-The AI proposes changes but **never decides what to keep** — that is always Dexter's job. This means experiments are consistent, reproducible, and the log clearly shows what each round changed and whether it helped.
-
----
-
-## Other Clever Things Under the Hood
-
-### The AI never gets the direction wrong
-
-Every comparison result — "Group A is higher than Group B by 23%" — is computed by Python before the AI ever sees it. The AI is told to copy that sentence verbatim, not re-derive it. In earlier versions, the AI would sometimes report the wrong group as higher. This eliminates that entirely.
-
-### High-value segments never get buried
-
-When a column has dozens of categories (like County with 50+ values), most systems just show "top 10 by count" and lump the rest into "Other." Dexter uses a smarter rule: keep whichever categories cover 95% of total spend, or top 10 by count — whichever shows more. A county with 50 members but 30% of total cost will never disappear into "Other."
-
-### Panel data is handled correctly
-
-When the same person appears across multiple months, averaging their monthly averages gives you the wrong number. Dexter always divides total sum by total observations — the statistically correct approach — not the common shortcut that quietly introduces error.
-
-### Every answer automatically comes with two follow-up analyses
-
-Dexter never stops at just answering your question. After the primary analysis, it automatically runs two follow-up analyses based on what it just found — no prompting needed. Ask about a distribution, and Dexter also runs a significance test and breaks it down by a second dimension. Ask about a trend, and it also shows you summary statistics and a segment breakdown. The follow-ups are chosen by rule, not by the AI, so they are consistent and fast every time.
-
-### When you ask "what changed?", Dexter scans every column to find out why
-
-For period-over-period comparisons (July vs September, this month vs last), Dexter doesn't just tell you the total change. It automatically loops through every categorical column in your data — gender, county, product, region, whatever you have — and computes each segment's contribution to the change. It then ranks them and surfaces only the ones that matter. Nobody told Dexter which columns to look at. It finds the drivers on its own.
-
-### If the AI hallucinates a column name, Dexter catches it
-
-When Dexter matches your question to columns in your data, the AI sometimes returns a column name that doesn't exist. Dexter validates every column name before using it and falls back to a sensible default if the AI got it wrong. The analysis continues — it never crashes silently with bad data.
+- Accuracy of statistical outputs
+- Consistency across repeated runs
+- Schema understanding
+- Depth of insight (follow-up analysis quality)
+- Failure modes and edge cases
 
 ---
 
-## Guardrails
+## The Solution
 
-- Python computes every number in the report — the AI only writes the narrative
-- Your data stays on your machine
-- Every report saves with a timestamp for auditability
-- A safety layer blocks the AI from deleting files, making network calls, or running dangerous system commands
+**Dexter is an AI-powered data scientist that:**
+
+1. Takes a dataset + plain English question
+2. Runs real statistical analysis (not hallucinated code)
+3. Produces a clear, executive-ready report
+4. Automatically generates deeper follow-up insights
 
 ---
 
-## Built With
+## What Makes Dexter Different
 
-- [Claude Agent SDK](https://www.anthropic.com) — AI reasoning and report writing
-- Python — all statistical computation (pandas, scipy, scikit-learn, LightGBM, XGBoost)
-- Runs entirely locally — your data never leaves your machine
+### 1. Deterministic + AI (Not Just AI)
+
+Most tools:
+> "Write code → hope it works"
+
+Dexter:
+> "Use proven code → apply intelligence on top"
+
+- Pre-built statistical engine (Python)
+- AI only handles reasoning + narrative
+- **Zero fragile pipelines**
+
+---
+
+### 2. Always Goes One Level Deeper
+
+Dexter doesn't stop at the answer.
+
+Ask: *"Did costs increase?"*
+
+Dexter returns:
+
+- Answer
+- Drivers of change
+- Segment breakdown
+- Key contributors
+
+> This is the difference between **reporting** and **decision intelligence**.
+
+---
+
+### 3. Self-Improving Model Builder
+
+Dexter builds predictive models like a real data scientist:
+
+- Iterative improvement loop (up to 6 rounds)
+- One controlled change per iteration
+- Keeps only measurable improvements
+
+Optimized for:
+
+- Accuracy (AUC)
+- Business relevance (F1)
+- Explainability (SHAP)
+- Interpretability
+
+---
+
+### 4. Built for Real Data (Not Toy Datasets)
+
+- Handles messy schemas
+- Maps semantic meaning (e.g., `gender → SEX`)
+- Detects panel vs cross-sectional data
+- Avoids common statistical errors
+
+---
+
+## Why This Matters
+
+Dexter unlocks a new category: **Autonomous Analytics**
+
+Not dashboards. Not copilots. Not notebooks.
+
+A system that:
+
+- Thinks in analysis workflows
+- Explores data proactively
+- Surfaces insights without prompting
+
+---
+
+## Example
+
+```
+Input:
+"What changed from last month?"
+
+Output:
+Costs increased by 18%
+
+Drivers:
+  • Chronic members → +72% contribution
+  • Alameda County → +$2.1M impact
+  • Top 5 members → 40% of increase
+
+Follow-ups:
+  • Gender-based breakdown
+  • Statistical significance test
+```
+
+---
+
+## Architecture
+
+```
+User Question
+      ↓
+Data Profiler → Understands schema + structure
+      ↓
+Deterministic Analysis Engine (Python)
+      ↓
+AI Reasoning Layer (Claude)
+      ↓
+Executive Report + Follow-ups
+```
+
+---
+
+## Trust & Reliability
+
+- All numbers computed in Python (not AI)
+- AI cannot alter results
+- Local-first (data never leaves your environment)
+- Full audit trail with timestamps
+
+> Built for enterprise trust from day one — can learn from your existing analytics process
+
+---
+
+## Vision
+
+> Move to an always-on analyst, 24/7
+
+- Multi-agent analytics systems
+- Continuous decision intelligence
+- Fully autonomous data workflows
+
+---
+
+## What's Next
+
+- Web interface / productization
+- Multi-dataset joins
+- Price, volume, mix analytics; industry-specific analysis; time series; recommendation engine
+- Integration into agentic ecosystems (DexterityAI)
+
+---
+
+## Philosophy
+
+> The value of data science isn't just answering the question — it's solving the problem.

@@ -99,18 +99,15 @@ Dexter returns:
 
 ### 3. Self-Improving Model Builder
 
+Took a leaf out of [Andrej Karpathy's autoresearch repo](https://github.com/karpathy/autoresearch) and built a self-improving loop that actually works in practice — the orchestrator runs each experiment, scores it, and only keeps changes that move the needle.
+
 Dexter builds predictive models like a real data scientist:
 
 - Iterative improvement loop (up to 6 rounds)
 - One controlled change per iteration
 - Keeps only measurable improvements
 
-Optimized for:
-
-- Accuracy (AUC)
-- Business relevance (F1)
-- Explainability (SHAP)
-- Interpretability
+The key insight: don't optimize for a single data science metric. Real-world models need to be good across the board — so Dexter scores each iteration on a **composite** of AUC, interpretability, and inference speed. A model that's 2% more accurate but twice as slow and impossible to explain isn't actually better.
 
 ---
 

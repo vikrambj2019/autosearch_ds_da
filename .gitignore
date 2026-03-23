@@ -6,3 +6,6 @@ __pycache__/
 *.pyo
 .DS_Store
 architecture-diagram.skill
+
+# Data files
+Data/

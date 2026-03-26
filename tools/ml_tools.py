@@ -3,6 +3,11 @@ MCP tools for ML pipeline execution and scoring.
 
 run_pipeline: Execute a complete ML pipeline script and return metrics.
 score_metrics: Compute composite score from pipeline metrics.
+
+Pipeline code runs inside a persistent virtual environment (.ml_venv/)
+pre-loaded with common ML packages (see ml_requirements.txt).
+If a pipeline fails with ModuleNotFoundError, the missing package is
+auto-installed and the pipeline is retried once.
 """
 
 from __future__ import annotations
@@ -10,12 +15,86 @@ from __future__ import annotations
 import ast
 import json
 import math
+import re
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# ML Virtual Environment
+# ---------------------------------------------------------------------------
+
+_ROOT = Path(__file__).resolve().parent.parent
+_VENV_DIR = _ROOT / ".ml_venv"
+_REQUIREMENTS = _ROOT / "ml_requirements.txt"
+
+
+def _get_venv_python() -> str:
+    """Return path to the venv Python, creating the venv if needed."""
+    venv_python = _VENV_DIR / "bin" / "python"
+    if venv_python.exists():
+        return str(venv_python)
+    return _create_venv()
+
+
+def _create_venv() -> str:
+    """Create the ML venv and install requirements. Returns venv Python path."""
+    print(f"[ml_tools] Creating ML venv at {_VENV_DIR} ...")
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(_VENV_DIR)],
+        check=True,
+        capture_output=True,
+    )
+    venv_python = str(_VENV_DIR / "bin" / "python")
+    # Upgrade pip quietly
+    subprocess.run(
+        [venv_python, "-m", "pip", "install", "--upgrade", "pip"],
+        capture_output=True,
+    )
+    # Install requirements
+    if _REQUIREMENTS.exists():
+        print(f"[ml_tools] Installing packages from {_REQUIREMENTS.name} ...")
+        result = subprocess.run(
+            [venv_python, "-m", "pip", "install", "-r", str(_REQUIREMENTS)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            print(f"[ml_tools] WARNING: pip install failed:\n{result.stderr[-500:]}")
+    print("[ml_tools] ML venv ready.")
+    return venv_python
+
+
+def _install_missing(module_name: str) -> bool:
+    """Try to pip-install a missing module into the venv. Returns True on success."""
+    # Map common import names to pip package names
+    pip_name_map = {
+        "imblearn": "imbalanced-learn",
+        "sklearn": "scikit-learn",
+        "cv2": "opencv-python",
+        "PIL": "Pillow",
+        "yaml": "pyyaml",
+    }
+    pip_name = pip_name_map.get(module_name, module_name)
+    venv_python = str(_VENV_DIR / "bin" / "python")
+    print(f"[ml_tools] Auto-installing {pip_name} into ML venv ...")
+    result = subprocess.run(
+        [venv_python, "-m", "pip", "install", pip_name],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return result.returncode == 0
+
+
+def _parse_missing_module(stderr: str) -> str | None:
+    """Extract module name from ModuleNotFoundError in stderr."""
+    m = re.search(r"ModuleNotFoundError: No module named ['\"](\w+)['\"]", stderr)
+    return m.group(1) if m else None
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +232,23 @@ async def run_pipeline_handler(args: dict[str, Any]) -> dict[str, Any]:
     """
     code = args["code"]
     data_path = str(Path(args["data_path"]).resolve())  # Always use absolute path
-    target_col = args.get("target_col", "TARGET_HIGH_COST_FLAG")
+    target_col = args.get("target_col")
+    if not target_col:
+        # Auto-detect: look for columns with "target" or "flag" in the name
+        import pandas as pd
+        cols = list(pd.read_csv(data_path, nrows=0).columns)
+        for c in cols:
+            if "target" in c.lower() or "flag" in c.lower():
+                target_col = c
+                break
+        if not target_col:
+            return {
+                "content": [{"type": "text", "text": json.dumps({
+                    "success": False,
+                    "error": f"No target_col specified and could not auto-detect. Columns: {cols[:20]}",
+                })}],
+                "is_error": True,
+            }
     timeout = args.get("timeout", PIPELINE_TIMEOUT)
 
     # Validate code
@@ -174,6 +269,9 @@ async def run_pipeline_handler(args: dict[str, Any]) -> dict[str, Any]:
     code = code.replace('TARGET_COL = "PLACEHOLDER"', f'TARGET_COL = "{target_col}"')
     code = code.replace("TARGET_COL = 'PLACEHOLDER'", f"TARGET_COL = '{target_col}'")
 
+    # Get venv Python (creates venv on first use)
+    venv_python = _get_venv_python()
+
     # Write to temp directory and execute
     with tempfile.TemporaryDirectory(prefix="ml_pipeline_") as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -183,28 +281,45 @@ async def run_pipeline_handler(args: dict[str, Any]) -> dict[str, Any]:
         metrics_file = tmpdir_path / "metrics.json"
         shap_file = tmpdir_path / "shap_features.json"
 
-        t0 = time.time()
-        try:
-            result = subprocess.run(
-                [sys.executable, str(pipeline_file)],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=str(tmpdir_path),
-            )
-            elapsed = time.time() - t0
-        except subprocess.TimeoutExpired:
-            return {
-                "content": [{"type": "text", "text": json.dumps({
-                    "success": False,
-                    "error": f"Pipeline timed out after {timeout}s",
-                    "execution_time_s": timeout,
-                }, indent=2)}],
-                "is_error": True,
-            }
+        # Run pipeline with auto-retry on missing module
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            t0 = time.time()
+            try:
+                result = subprocess.run(
+                    [venv_python, str(pipeline_file)],
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    cwd=str(tmpdir_path),
+                )
+                elapsed = time.time() - t0
+            except subprocess.TimeoutExpired:
+                return {
+                    "content": [{"type": "text", "text": json.dumps({
+                        "success": False,
+                        "error": f"Pipeline timed out after {timeout}s",
+                        "execution_time_s": timeout,
+                    }, indent=2)}],
+                    "is_error": True,
+                }
 
-        stdout = result.stdout[-2000:] if result.stdout else ""
-        stderr = result.stderr[-2000:] if result.stderr else ""
+            stdout = result.stdout[-2000:] if result.stdout else ""
+            stderr = result.stderr[-2000:] if result.stderr else ""
+
+            # Auto-recover: if missing module, install and retry once
+            if result.returncode != 0 and attempt == 0:
+                missing = _parse_missing_module(stderr)
+                if missing:
+                    installed = _install_missing(missing)
+                    if installed:
+                        # Clean up metrics/shap from failed attempt
+                        for f in [metrics_file, shap_file]:
+                            if f.exists():
+                                f.unlink()
+                        continue  # retry
+
+            break  # success or non-recoverable failure
 
         if result.returncode != 0:
             return {
@@ -261,11 +376,21 @@ async def run_pipeline_handler(args: dict[str, Any]) -> dict[str, Any]:
             if isinstance(shap_features, dict):
                 # e.g. {"top_30_features": [...]} or {"features": [...]}
                 for key in ("top_30_features", "features", "shap_features"):
-                    if key in shap_features and isinstance(shap_features[key], list):
-                        features_list = shap_features[key]
-                        break
+                    if key in shap_features:
+                        val = shap_features[key]
+                        if isinstance(val, list):
+                            features_list = val
+                            break
+                        elif isinstance(val, dict):
+                            # {"feature_name": importance, ...} → convert to list of dicts
+                            features_list = [{"feature": k, "importance": v} for k, v in val.items()]
+                            break
                 else:
-                    features_list = []
+                    # Top-level dict might be {"feature_name": importance, ...}
+                    if all(isinstance(v, (int, float)) for v in shap_features.values()):
+                        features_list = [{"feature": k, "importance": v} for k, v in shap_features.items()]
+                    else:
+                        features_list = []
 
             if features_list and isinstance(features_list, list):
                 if isinstance(features_list[0], dict):
@@ -291,7 +416,7 @@ async def run_pipeline_handler(args: dict[str, Any]) -> dict[str, Any]:
             "execution_time_s": round(elapsed, 1),
             "stdout": stdout[-500:],
         }
-        if shap_features:
+        if shap_features and isinstance(shap_features, list):
             output["shap_features"] = shap_features[:20]  # Top 20 only
 
         return {

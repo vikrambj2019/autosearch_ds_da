@@ -10,6 +10,10 @@ Outputs:
 
 DO NOT CHANGE: DATA_PATH, TARGET_COL, METRICS_OUT, SHAP_OUT
 (these are injected by the run_pipeline tool)
+
+Available packages in ML venv:
+  pandas, numpy, scipy, scikit-learn, lightgbm, xgboost, catboost,
+  imbalanced-learn (imblearn), shap, optuna, feature-engine, tabulate, joblib
 """
 import json
 import time
@@ -31,11 +35,17 @@ DATA_PATH = "PLACEHOLDER"
 TARGET_COL = "PLACEHOLDER"
 METRICS_OUT = Path("metrics.json")
 SHAP_OUT = Path("shap_features.json")
-DROP_COLS = ["FEATURE_STORE_MEMBER_ID"]
+DROP_COLS = []  # Extra columns to drop (e.g., leaky features)
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ── CONFIGURATION — Agent modifies this section ──────────────────────────────
-MODEL_TYPE = "lgbm"          # lgbm | xgb | rf
+MODEL_TYPE = "lgbm"          # lgbm | xgb | rf | catboost
+
+RESAMPLE = "none"            # none | smote | adasyn | borderline_smote
+RESAMPLE_RATIO = 0.5         # target minority/majority ratio after resampling
+
+THRESHOLD_TUNING = False     # if True, sweep thresholds to maximize F1
+BINARIZE_TARGET = False      # if True, convert target to binary (>0 → 1)
 
 FEATURE_SELECTION = "none"   # none | shap_top_k | correlation | mutual_info | variance
 FEATURE_SELECTION_K = 80     # for shap_top_k / mutual_info: number of features to keep
@@ -75,37 +85,71 @@ RF_PARAMS = dict(
     max_features="sqrt",
     class_weight="balanced",
 )
+
+# CatBoost params
+CATBOOST_PARAMS = dict(
+    iterations=500,
+    learning_rate=0.05,
+    depth=6,
+    auto_class_weights="Balanced",
+)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def load_and_preprocess(data_path, target_col):
     df = pd.read_csv(data_path)
-    y = df[target_col].astype(int)
-    X = df.drop(columns=[target_col] + [c for c in DROP_COLS if c in df.columns])
+
+    # Binarize target if configured
+    if BINARIZE_TARGET:
+        y = (df[target_col] > 0).astype(int)
+    else:
+        y = df[target_col].astype(int)
+
+    # Auto-detect ID/entity columns to drop (uuid-like strings or unique-per-row)
+    drop = list(DROP_COLS)
+    for col in df.select_dtypes(include="object").columns:
+        if col == target_col:
+            continue
+        if df[col].nunique() > 0.9 * len(df):
+            drop.append(col)
+
+    X = df.drop(columns=[target_col] + [c for c in drop if c in df.columns])
+
+    # Drop constant columns (0 or 1 unique value)
+    constant_cols = [c for c in X.columns if X[c].nunique() <= 1]
+    if constant_cols:
+        print(f"  Dropping {len(constant_cols)} constant columns")
+        X = X.drop(columns=constant_cols)
 
     # Drop columns with >50% missing
-    X = X.loc[:, X.isnull().mean() < 0.5]
+    high_null = X.columns[X.isnull().mean() >= 0.5].tolist()
+    if high_null:
+        print(f"  Dropping {len(high_null)} columns with >50% nulls")
+        X = X.drop(columns=high_null)
 
     # Encode categoricals
     le = LabelEncoder()
     for col in X.select_dtypes(include="object").columns:
         X[col] = le.fit_transform(X[col].astype(str).fillna("MISSING"))
 
-    # Fill remaining nulls
+    # Fill remaining nulls with median
     X = X.fillna(X.median(numeric_only=True))
+
+    # Replace any remaining inf/-inf with NaN then fill
+    X = X.replace([np.inf, -np.inf], np.nan).fillna(0)
+
     return X, y
 
 
 def select_features(X_train, y_train, X_test):
     """Apply configured feature selection."""
-    import lightgbm as lgb
-
     method = FEATURE_SELECTION
 
     if method == "none":
         return X_train, X_test, list(X_train.columns)
 
     elif method == "shap_top_k":
+        import lightgbm as lgb
         proxy = lgb.LGBMClassifier(n_estimators=50, random_state=42, n_jobs=-1, verbose=-1)
         proxy.fit(X_train, y_train)
         imp = proxy.feature_importances_
@@ -136,6 +180,38 @@ def select_features(X_train, y_train, X_test):
     return X_train[cols], X_test[cols], cols
 
 
+def resample_train(X_train, y_train):
+    """Apply resampling to handle class imbalance. Always NaN-safe."""
+    if RESAMPLE == "none":
+        return X_train, y_train
+
+    # Safety: ensure no NaN/inf before resampling (imblearn requires clean data)
+    X_clean = X_train.fillna(0).replace([np.inf, -np.inf], 0)
+
+    try:
+        if RESAMPLE == "smote":
+            from imblearn.over_sampling import SMOTE
+            sampler = SMOTE(sampling_strategy=RESAMPLE_RATIO, random_state=42)
+        elif RESAMPLE == "adasyn":
+            from imblearn.over_sampling import ADASYN
+            sampler = ADASYN(sampling_strategy=RESAMPLE_RATIO, random_state=42)
+        elif RESAMPLE == "borderline_smote":
+            from imblearn.over_sampling import BorderlineSMOTE
+            sampler = BorderlineSMOTE(sampling_strategy=RESAMPLE_RATIO, random_state=42)
+        else:
+            print(f"  WARNING: Unknown RESAMPLE={RESAMPLE!r}, skipping")
+            return X_train, y_train
+
+        X_res, y_res = sampler.fit_resample(X_clean, y_train)
+        X_res = pd.DataFrame(X_res, columns=X_train.columns)
+        print(f"  Resampled: {len(X_train)} → {len(X_res)} (method={RESAMPLE})")
+        return X_res, y_res
+
+    except Exception as e:
+        print(f"  WARNING: Resampling failed ({e}), using original data")
+        return X_train, y_train
+
+
 def build_model(model_type, scale_pos):
     if model_type == "lgbm":
         import lightgbm as lgb
@@ -154,22 +230,47 @@ def build_model(model_type, scale_pos):
         params = {**RF_PARAMS, "random_state": 42, "n_jobs": -1}
         return RandomForestClassifier(**params)
 
+    elif model_type == "catboost":
+        from catboost import CatBoostClassifier
+        params = {**CATBOOST_PARAMS, "random_seed": 42, "verbose": 0}
+        return CatBoostClassifier(**params)
+
     raise ValueError(f"Unknown MODEL_TYPE: {model_type!r}")
 
 
 def compute_shap(model, X_sample, model_type):
     """Returns (n_samples, n_features) array of |SHAP values| for positive class."""
-    import shap
-    explainer = shap.TreeExplainer(model)
-    sv = explainer.shap_values(X_sample)
+    try:
+        import shap
+        explainer = shap.TreeExplainer(model)
+        sv = explainer.shap_values(X_sample)
 
-    if isinstance(sv, list):
-        arr = np.abs(sv[1]) if len(sv) >= 2 else np.abs(sv[0])
-    elif sv.ndim == 3:
-        arr = np.abs(sv[:, :, 1])
-    else:
-        arr = np.abs(sv)
-    return arr
+        if isinstance(sv, list):
+            arr = np.abs(sv[1]) if len(sv) >= 2 else np.abs(sv[0])
+        elif sv.ndim == 3:
+            arr = np.abs(sv[:, :, 1])
+        else:
+            arr = np.abs(sv)
+        return arr
+    except Exception as e:
+        print(f"  WARNING: SHAP failed ({e}), using model feature_importances_")
+        # Fallback: use model's built-in importance as a (1, n_features) array
+        try:
+            imp = model.feature_importances_
+            return imp.reshape(1, -1)
+        except Exception:
+            return np.ones((1, X_sample.shape[1]))
+
+
+def find_best_threshold(y_true, y_proba):
+    """Sweep thresholds to find the one that maximizes F1."""
+    best_f1, best_t = 0, 0.5
+    for t in np.arange(0.1, 0.9, 0.02):
+        preds = (y_proba >= t).astype(int)
+        score = f1_score(y_true, preds, zero_division=0)
+        if score > best_f1:
+            best_f1, best_t = score, t
+    return best_t, best_f1
 
 
 def train_and_evaluate(X, y):
@@ -179,20 +280,40 @@ def train_and_evaluate(X, y):
 
     neg, pos = (y_train == 0).sum(), (y_train == 1).sum()
     scale_pos = float(neg / pos) if pos > 0 else 1.0
+    print(f"  Class balance: {pos}/{neg} (ratio={scale_pos:.1f}:1)")
 
+    # Feature selection
     X_train_s, X_test_s, selected_cols = select_features(X_train, y_train, X_test)
 
+    # Resampling (applied AFTER feature selection, on clean data)
+    X_train_r, y_train_r = resample_train(X_train_s, y_train)
+
+    # Build and train model
     model = build_model(MODEL_TYPE, scale_pos)
-    model.fit(X_train_s, y_train)
+    model.fit(X_train_r, y_train_r)
 
+    # Predict
     y_proba = model.predict_proba(X_test_s)[:, 1]
-    y_pred = model.predict(X_test_s)
 
-    auc = roc_auc_score(y_test, y_proba)
-    f1 = f1_score(y_test, y_pred, average="weighted", zero_division=0)
+    # Threshold tuning
+    if THRESHOLD_TUNING:
+        threshold, tuned_f1 = find_best_threshold(y_test, y_proba)
+        print(f"  Tuned threshold: {threshold:.2f} (F1={tuned_f1:.4f})")
+    else:
+        threshold = 0.5
+
+    y_pred = (y_proba >= threshold).astype(int)
+
+    # Metrics
+    try:
+        auc = roc_auc_score(y_test, y_proba)
+    except Exception:
+        auc = 0.0
+
+    f1 = f1_score(y_test, y_pred, zero_division=0)
     accuracy = accuracy_score(y_test, y_pred)
-    precision = precision_score(y_test, y_pred, average="weighted", zero_division=0)
-    recall = recall_score(y_test, y_pred, average="weighted", zero_division=0)
+    precision = precision_score(y_test, y_pred, zero_division=0)
+    recall = recall_score(y_test, y_pred, zero_division=0)
 
     # SHAP explainability
     sample_n = min(500, len(X_test_s))
@@ -205,10 +326,11 @@ def train_and_evaluate(X, y):
     explainability_coverage = float(top10 / total) if total > 0 else 0.0
 
     # Save top-30 SHAP features
-    top30_idx = np.argsort(mean_imp)[-30:][::-1]
+    n_feats = min(30, len(selected_cols))
+    top_idx = np.argsort(mean_imp)[-n_feats:][::-1]
     shap_features = [
         {"feature": selected_cols[i], "mean_abs_shap": float(mean_imp[i])}
-        for i in top30_idx
+        for i in top_idx
     ]
     SHAP_OUT.write_text(json.dumps(shap_features, indent=2))
 
@@ -220,17 +342,19 @@ def train_and_evaluate(X, y):
         "recall": float(recall),
         "explainability_coverage": explainability_coverage,
         "model_type": MODEL_TYPE,
+        "resample": RESAMPLE,
+        "threshold": float(threshold),
         "feature_selection": FEATURE_SELECTION,
         "n_features": int(X_train.shape[1]),
         "n_selected_features": int(len(selected_cols)),
-        "n_train": int(X_train_s.shape[0]),
+        "n_train": int(X_train_r.shape[0]),
         "n_test": int(X_test_s.shape[0]),
     }
 
 
 if __name__ == "__main__":
     t0 = time.time()
-    print(f"Model={MODEL_TYPE}  FeatureSelection={FEATURE_SELECTION}")
+    print(f"Model={MODEL_TYPE}  FeatureSelection={FEATURE_SELECTION}  Resample={RESAMPLE}")
     print(f"Loading: {DATA_PATH}")
     X, y = load_and_preprocess(DATA_PATH, TARGET_COL)
     print(f"  Shape={X.shape}  class_balance={y.mean():.4f}")

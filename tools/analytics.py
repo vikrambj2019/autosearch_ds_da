@@ -46,6 +46,89 @@ def _is_panel(df: pd.DataFrame, entity_col: str | None, time_col: str | None) ->
     return entity_col is not None and time_col is not None
 
 
+def apply_filters(df: pd.DataFrame, filters: list[dict] | None) -> pd.DataFrame:
+    """Apply a list of filter conditions to a DataFrame.
+
+    Each filter is a dict: {"column": str, "op": str, "value": any}
+    Supported ops: "==", "!=", ">", ">=", "<", "<=", "in", "not_in",
+                   "contains", "not_null"
+
+    Example:
+        [{"column": "gender", "op": "==", "value": "Male"},
+         {"column": "Pclass", "op": "in", "value": [1, 2]},
+         {"column": "Age", "op": ">", "value": 30}]
+    """
+    if not filters:
+        return df
+
+    result = df.copy()
+    for f in filters:
+        col = f["column"]
+        op = f["op"]
+        val = f.get("value")
+
+        if col not in result.columns:
+            continue
+
+        if op == "==":
+            result = result[result[col] == val]
+        elif op == "!=":
+            result = result[result[col] != val]
+        elif op == ">":
+            result = result[result[col] > float(val)]
+        elif op == ">=":
+            result = result[result[col] >= float(val)]
+        elif op == "<":
+            result = result[result[col] < float(val)]
+        elif op == "<=":
+            result = result[result[col] <= float(val)]
+        elif op == "in":
+            result = result[result[col].isin(val)]
+        elif op == "not_in":
+            result = result[~result[col].isin(val)]
+        elif op == "contains":
+            result = result[result[col].astype(str).str.contains(str(val), case=False, na=False)]
+        elif op == "not_null":
+            result = result[result[col].notna()]
+
+    return result
+
+
+def _auto_bin_numeric_group_by(
+    df: pd.DataFrame,
+    gb_cols: list[str],
+) -> tuple[pd.DataFrame, list[str], dict[str, str]]:
+    """Auto-bin numeric group_by columns into quartiles.
+
+    Returns (modified_df, updated_gb_cols, bin_info) where bin_info maps
+    original column name to the new binned column name.
+
+    Categorical columns pass through unchanged.
+    """
+    bin_info: dict[str, str] = {}
+    new_gb_cols = []
+    df = df.copy()
+    for col in gb_cols:
+        if col not in df.columns:
+            continue
+        if pd.api.types.is_numeric_dtype(df[col]):
+            bin_col = f"{col}_quartile"
+            df[bin_col] = pd.qcut(df[col], q=4, duplicates="drop")
+            # Format labels: "Q1 (low-high)" style
+            cats = df[bin_col].cat.categories
+            label_map = {}
+            for i, interval in enumerate(cats):
+                lo = f"{interval.left:,.0f}"
+                hi = f"{interval.right:,.0f}"
+                label_map[interval] = f"Q{i+1} ({lo}-{hi})"
+            df[bin_col] = df[bin_col].map(label_map).astype(str)
+            bin_info[col] = bin_col
+            new_gb_cols.append(bin_col)
+        else:
+            new_gb_cols.append(col)
+    return df, new_gb_cols, bin_info
+
+
 def _apply_top_n(
     df: pd.DataFrame,
     category_col: str,
@@ -219,12 +302,14 @@ def distribution_by_category(
     entity_col: str | None = None,
     time_col: str | None = None,
     top_n: int = 10,
+    filters: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Distribution of a metric grouped by a categorical variable.
 
     mean = sum(metric) / count(observations) per group — no avg of avg.
     Entity counts use nunique(entity_col) for panel data.
     """
+    df = apply_filters(df, filters)
     if entity_col is None and time_col is None:
         entity_col, time_col = _detect_entity_time(df)
 
@@ -452,6 +537,7 @@ def group_comparison(
     time_col: str | None = None,
     group_a: str | None = None,
     group_b: str | None = None,
+    filters: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Statistical comparison of a metric between groups.
 
@@ -459,6 +545,7 @@ def group_comparison(
     2 groups: Welch's t-test + Mann-Whitney + Cohen's d
     3+ groups: ANOVA + Kruskal-Wallis
     """
+    df = apply_filters(df, filters)
     if entity_col is None and time_col is None:
         entity_col, time_col = _detect_entity_time(df)
 
@@ -701,18 +788,67 @@ def correlation_analysis(
     metric_b: str,
     entity_col: str | None = None,
     time_col: str | None = None,
+    filters: list[dict] | None = None,
+    group_by: str | list[str] | None = None,
 ) -> dict[str, Any]:
     """Correlation between two numeric columns.
 
     Uses raw observations. For panel data, also reports entity count.
+    If group_by is provided (str or list of str), runs correlation
+    separately per group.
     """
+    df = apply_filters(df, filters)
     if entity_col is None and time_col is None:
         entity_col, time_col = _detect_entity_time(df)
 
     is_panel = _is_panel(df, entity_col, time_col)
-    dq_a = _nan_report(df[metric_a], metric_a)
-    dq_b = _nan_report(df[metric_b], metric_b)
 
+    # Normalize group_by to list
+    gb_cols = [group_by] if isinstance(group_by, str) else (group_by or [])
+    gb_cols = [c for c in gb_cols if c in df.columns]
+
+    # Auto-bin numeric group_by columns into quartiles
+    if gb_cols:
+        df, gb_cols, bin_info = _auto_bin_numeric_group_by(df, gb_cols)
+
+    # Per-group correlation
+    if gb_cols:
+        groups = {}
+        for group_key, group_df in df.groupby(gb_cols):
+            key = str(group_key) if not isinstance(group_key, tuple) else (str(group_key[0]) if len(group_key) == 1 else str(group_key))
+            groups[key] = _correlation_core(
+                group_df, metric_a, metric_b, entity_col,
+            )
+        result_gb = {
+            "analysis_type": "correlation",
+            "metric_a": metric_a,
+            "metric_b": metric_b,
+            "grain": "panel" if is_panel else "cross_sectional",
+            "group_by": gb_cols if len(gb_cols) > 1 else gb_cols[0],
+            "groups": groups,
+        }
+        if bin_info:
+            result_gb["binned_columns"] = bin_info
+            result_gb["binning_note"] = "Numeric group_by columns were auto-binned into quartiles"
+        return result_gb
+
+    result = _correlation_core(df, metric_a, metric_b, entity_col)
+    result["grain"] = "panel" if is_panel else "cross_sectional"
+    result["aggregation_note"] = "computed on raw observations (one row per member-month)"
+    result["data_quality"] = [
+        _nan_report(df[metric_a], metric_a),
+        _nan_report(df[metric_b], metric_b),
+    ]
+    return result
+
+
+def _correlation_core(
+    df: pd.DataFrame,
+    metric_a: str,
+    metric_b: str,
+    entity_col: str | None,
+) -> dict[str, Any]:
+    """Core correlation computation shared by overall and per-group paths."""
     analysis_df = df[[metric_a, metric_b]].dropna()
     n_obs = len(analysis_df)
 
@@ -740,11 +876,8 @@ def correlation_analysis(
         "analysis_type": "correlation",
         "metric_a": metric_a,
         "metric_b": metric_b,
-        "grain": "panel" if is_panel else "cross_sectional",
-        "aggregation_note": "computed on raw observations (one row per member-month)",
         "n_observations": n_obs,
         "n_entities": n_entities,
-        "data_quality": [dq_a, dq_b],
         "pearson": {
             "r": round(float(pearson_r), 4),
             "p_value": round(float(pearson_p), 6),
@@ -758,7 +891,14 @@ def correlation_analysis(
         "interpretation": {
             "strength": strength,
             "direction": sign,
-            "summary": f"{strength} {sign} correlation (r={pearson_r:.3f}, p={pearson_p:.4f})",
+            "relationship_type": (
+                "linear" if (
+                    pearson_p < 0.05
+                    and r >= 0.5
+                    and abs(float(spearman_r)) - r < 0.15  # Spearman not much stronger → linear
+                ) else "nonlinear"
+            ),
+            "summary": f"{strength} {sign} correlation (r={pearson_r:.4f}, p={pearson_p:.6f})",
         },
     }
 
@@ -772,17 +912,68 @@ def summary_stats(
     metric: str,
     entity_col: str | None = None,
     time_col: str | None = None,
+    filters: list[dict] | None = None,
+    group_by: str | list[str] | None = None,
 ) -> dict[str, Any]:
     """Summary statistics for a single metric.
 
     Uses raw observations. mean = sum / count (no avg of avg).
+    If group_by is provided (str or list of str), runs summary stats
+    separately per group.
     """
+    df = apply_filters(df, filters)
     if entity_col is None and time_col is None:
         entity_col, time_col = _detect_entity_time(df)
 
     is_panel = _is_panel(df, entity_col, time_col)
-    data_quality = _nan_report(df[metric], metric)
 
+    # Normalize group_by to list
+    gb_cols = [group_by] if isinstance(group_by, str) else (group_by or [])
+    gb_cols = [c for c in gb_cols if c in df.columns]
+
+    # Auto-bin numeric group_by columns into quartiles
+    if gb_cols:
+        df, gb_cols, bin_info = _auto_bin_numeric_group_by(df, gb_cols)
+
+    # Per-group summary stats
+    if gb_cols:
+        groups = {}
+        for group_key, group_df in df.groupby(gb_cols):
+            key = str(group_key) if not isinstance(group_key, tuple) else (str(group_key[0]) if len(group_key) == 1 else str(group_key))
+            groups[key] = _summary_stats_core(
+                group_df, metric, entity_col,
+            )
+        result_gb = {
+            "analysis_type": "summary_stats",
+            "metric": metric,
+            "grain": "panel" if is_panel else "cross_sectional",
+            "group_by": gb_cols if len(gb_cols) > 1 else gb_cols[0],
+            "groups": groups,
+        }
+        if bin_info:
+            result_gb["binned_columns"] = bin_info
+            result_gb["binning_note"] = "Numeric group_by columns were auto-binned into quartiles"
+        return result_gb
+
+    result = _summary_stats_core(df, metric, entity_col)
+    result["grain"] = "panel" if is_panel else "cross_sectional"
+    result["aggregation_note"] = "mean = total_sum / obs_count on raw observations (no avg of avg)"
+    n_obs = result["n_observations"]
+    n_entities = result["n_entities"]
+    result["computed_on"] = (
+        f"raw observations ({n_obs} obs from {n_entities} entities)" if is_panel
+        else f"raw rows ({n_obs})"
+    )
+    result["data_quality"] = _nan_report(df[metric], metric)
+    return result
+
+
+def _summary_stats_core(
+    df: pd.DataFrame,
+    metric: str,
+    entity_col: str | None,
+) -> dict[str, Any]:
+    """Core summary stats computation shared by overall and per-group paths."""
     vals = df[metric].dropna()
     n_obs = len(vals)
     total_sum = float(vals.sum())
@@ -792,35 +983,215 @@ def summary_stats(
     desc = vals.describe()
     ci = _confidence_interval(vals)
 
+    std_val = float(desc["std"])
     return {
         "analysis_type": "summary_stats",
         "metric": metric,
-        "grain": "panel" if is_panel else "cross_sectional",
-        "aggregation_note": "mean = total_sum / obs_count on raw observations (no avg of avg)",
-        "computed_on": f"raw observations ({n_obs} obs from {n_entities} entities)" if is_panel else f"raw rows ({n_obs})",
         "n_entities": n_entities,
         "n_observations": n_obs,
-        "data_quality": data_quality,
         "statistics": {
-            "total_sum": round(total_sum, 2),
-            "mean": round(mean, 2),
-            "std": round(float(desc["std"]), 2),
-            "min": round(float(desc["min"]), 2),
-            "p25": round(float(desc["25%"]), 2),
-            "median": round(float(desc["50%"]), 2),
-            "p75": round(float(desc["75%"]), 2),
-            "iqr": round(float(desc["75%"] - desc["25%"]), 2),
-            "p90": round(float(vals.quantile(0.90)), 2),
-            "p95": round(float(vals.quantile(0.95)), 2),
-            "p99": round(float(vals.quantile(0.99)), 2),
-            "max": round(float(desc["max"]), 2),
+            "total_sum": round(total_sum, 4),
+            "mean": round(mean, 4),
+            "std": round(std_val, 4),
+            "min": round(float(desc["min"]), 4),
+            "p25": round(float(desc["25%"]), 4),
+            "median": round(float(desc["50%"]), 4),
+            "p75": round(float(desc["75%"]), 4),
+            "iqr": round(float(desc["75%"] - desc["25%"]), 4),
+            "p90": round(float(vals.quantile(0.90)), 4),
+            "p95": round(float(vals.quantile(0.95)), 4),
+            "p99": round(float(vals.quantile(0.99)), 4),
+            "max": round(float(desc["max"]), 4),
             "ci_95": ci,
         },
         "shape": {
-            "skewness": round(float(vals.skew()), 3),
+            "skewness": round(float(vals.skew()), 4),
+            "kurtosis": round(float(vals.kurtosis()), 4),
+            "kurtosis_regular": round(float(vals.kurtosis()) + 3, 4),
+            "scipy_skewness": round(float(scipy_stats.skew(vals, bias=True)), 4),
+            "scipy_kurtosis_excess": round(float(scipy_stats.kurtosis(vals, bias=True)), 4),
+            "scipy_kurtosis_regular": round(float(scipy_stats.kurtosis(vals, bias=True)) + 3, 4),
+            "values_within_1_std": int(((vals >= mean - std_val) & (vals <= mean + std_val)).sum()),
+            "values_within_2_std": int(((vals >= mean - 2 * std_val) & (vals <= mean + 2 * std_val)).sum()),
             "zero_pct": round(float((vals == 0).mean()) * 100, 1),
-            "mean_to_median_ratio": round(mean / float(desc["50%"]), 2) if desc["50%"] > 0 else None,
+            "mean_to_median_ratio": round(mean / float(desc["50%"]), 4) if desc["50%"] > 0 else None,
         },
+    }
+
+
+# ---------------------------------------------------------------------------
+# 5b. normality_test
+# ---------------------------------------------------------------------------
+
+def normality_test(
+    df: pd.DataFrame,
+    metric: str,
+    group_col: str | None = None,
+    entity_col: str | None = None,
+    time_col: str | None = None,
+    alpha: float = 0.05,
+    filters: list[dict] | None = None,
+) -> dict[str, Any]:
+    """Test whether a column follows a normal distribution.
+
+    Runs Shapiro-Wilk and Kolmogorov-Smirnov tests. Returns pre-computed
+    decision so the LLM cannot get the interpretation wrong.
+
+    If group_col is provided, runs the test separately for each group.
+    """
+    df = apply_filters(df, filters)
+    if entity_col is None and time_col is None:
+        entity_col, time_col = _detect_entity_time(df)
+
+    is_panel = _is_panel(df, entity_col, time_col)
+
+    def _test_series(vals: pd.Series) -> dict:
+        vals = vals.dropna()
+        n = len(vals)
+        if n < 8:
+            return {"error": f"Insufficient data for normality test: {n} values"}
+
+        # Shapiro-Wilk (best for n < 5000)
+        if n <= 5000:
+            sw_stat, sw_p = scipy_stats.shapiro(vals)
+        else:
+            # Sample for Shapiro (it has a 5000 limit in some implementations)
+            sample = vals.sample(n=5000, random_state=42)
+            sw_stat, sw_p = scipy_stats.shapiro(sample)
+
+        # Kolmogorov-Smirnov (against normal with same mean/std)
+        ks_stat, ks_p = scipy_stats.kstest(vals, "norm", args=(vals.mean(), vals.std()))
+
+        # Anderson-Darling
+        ad_result = scipy_stats.anderson(vals, dist="norm")
+        # Use the 5% significance level (index 2)
+        ad_stat = float(ad_result.statistic)
+        ad_critical_5pct = float(ad_result.critical_values[2])
+        ad_is_normal = ad_stat < ad_critical_5pct
+
+        # Pre-computed decision: use Shapiro-Wilk as primary
+        is_normal = bool(sw_p >= alpha)
+
+        # Skewness and kurtosis for context
+        skewness = round(float(scipy_stats.skew(vals, bias=True)), 4)
+        kurtosis_excess = round(float(scipy_stats.kurtosis(vals, bias=True)), 4)
+        kurtosis = kurtosis_excess  # excess kurtosis (default in scipy)
+        kurtosis_regular = round(kurtosis_excess + 3, 4)  # Fisher → Pearson
+
+        return {
+            "n": n,
+            "is_normal": is_normal,
+            "decision": "normally distributed" if is_normal else "not normally distributed",
+            "alpha": alpha,
+            "shapiro_wilk": {
+                "statistic": round(float(sw_stat), 4),
+                "p_value": round(float(sw_p), 6),
+                "is_normal": bool(sw_p >= alpha),
+            },
+            "kolmogorov_smirnov": {
+                "statistic": round(float(ks_stat), 4),
+                "p_value": round(float(ks_p), 6),
+                "is_normal": bool(ks_p >= alpha),
+            },
+            "anderson_darling": {
+                "statistic": round(ad_stat, 4),
+                "critical_value_5pct": round(ad_critical_5pct, 4),
+                "is_normal": ad_is_normal,
+            },
+            "skewness": skewness,
+            "kurtosis_excess": kurtosis_excess,
+            "kurtosis_regular": kurtosis_regular,
+        }
+
+    result: dict[str, Any] = {
+        "analysis_type": "normality_test",
+        "metric": metric,
+        "grain": "panel" if is_panel else "cross_sectional",
+    }
+
+    if group_col:
+        groups = {}
+        for group_name, group_df in df.groupby(group_col):
+            if metric in group_df.columns:
+                groups[str(group_name)] = _test_series(group_df[metric])
+        result["groups"] = groups
+        result["group_col"] = group_col
+    else:
+        result.update(_test_series(df[metric]))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 5c. entity_lookup
+# ---------------------------------------------------------------------------
+
+def entity_lookup(
+    df: pd.DataFrame,
+    metric: str,
+    category: str,
+    mode: str = "max",
+    top_n: int = 5,
+    entity_col: str | None = None,
+    time_col: str | None = None,
+    filters: list[dict] | None = None,
+) -> dict[str, Any]:
+    """Find which entity has the highest/lowest value of a metric.
+
+    Answers questions like "which country has the highest happiness score?"
+    or "which store has the lowest revenue?"
+
+    For panel data, aggregates to entity-level (mean) before ranking.
+
+    Args:
+        metric: Numeric column to rank by
+        category: Column containing the entity names to return
+        mode: "max" or "min"
+        top_n: Number of top/bottom entries to return
+    """
+    df = apply_filters(df, filters)
+    if entity_col is None and time_col is None:
+        entity_col, time_col = _detect_entity_time(df)
+
+    is_panel = _is_panel(df, entity_col, time_col)
+
+    # For panel data, aggregate to one row per category value
+    if is_panel and category != entity_col:
+        agg_df = df.groupby(category)[metric].mean().reset_index()
+    else:
+        agg_df = df[[category, metric]].dropna()
+
+    if len(agg_df) == 0:
+        return {"error": f"No data for {metric} grouped by {category}"}
+
+    # Sort
+    ascending = mode == "min"
+    ranked = agg_df.sort_values(metric, ascending=ascending).reset_index(drop=True)
+
+    # Top entry
+    top_row = ranked.iloc[0]
+    answer = str(top_row[category])
+    answer_value = round(float(top_row[metric]), 4)
+
+    # Leaderboard
+    n = min(top_n, len(ranked))
+    leaderboard = [
+        {"rank": i + 1, category: str(ranked.iloc[i][category]),
+         metric: round(float(ranked.iloc[i][metric]), 4)}
+        for i in range(n)
+    ]
+
+    return {
+        "analysis_type": "entity_lookup",
+        "question_type": f"which {category} has the {'highest' if mode == 'max' else 'lowest'} {metric}",
+        "metric": metric,
+        "category": category,
+        "mode": mode,
+        "grain": "panel" if is_panel else "cross_sectional",
+        "answer": answer,
+        "answer_value": answer_value,
+        "n_entities": int(agg_df[category].nunique()),
+        "leaderboard": leaderboard,
     }
 
 
@@ -879,7 +1250,350 @@ def entity_counts(
 
 
 # ---------------------------------------------------------------------------
-# 7. period_comparison (entity-level diff between two time periods)
+# 7. price_volume_mix — PVM decomposition between two periods
+# ---------------------------------------------------------------------------
+
+def price_volume_mix(
+    df: pd.DataFrame,
+    revenue_col: str = "rev",
+    qty_col: str = "qty",
+    product_col: str = "product_sku",
+    customer_col: str | None = None,
+    time_col: str | None = None,
+    period_a: str | None = None,
+    period_b: str | None = None,
+    cost_col: str | None = None,
+    margin_col: str | None = None,
+    dimensions: list[str] | None = None,
+    filters: list[dict] | None = None,
+) -> dict[str, Any]:
+    """Price-Volume-Mix decomposition of revenue (or margin) change between two periods.
+
+    Decomposes total change into:
+      - Price effect: unit price changes on matched product-customer pairs
+      - Volume effect: total quantity change at base-period prices and mix
+      - Mix effect: shift in product/customer mix at base-period prices
+      - New effect: revenue from new product-customer combos (only in period B)
+      - Lost effect: revenue lost from churned combos (only in period A)
+
+    Auto-detects pricing grain: if unit prices vary by customer within the same
+    product_sku, matches at (product_sku, customer_id) level. Otherwise matches
+    at product_sku level only.
+    """
+    df = apply_filters(df, filters)
+    df = df.copy()
+
+    # ── Detect time column and resolve periods ──────────────────────────
+    if time_col is None:
+        # Auto-detect: first date-like column
+        for c in df.columns:
+            if "date" in c.lower() or "period" in c.lower() or "month" in c.lower():
+                time_col = c
+                break
+        if time_col is None:
+            return {"error": "No time/date column detected. Pass time_col explicitly."}
+
+    if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
+        df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+
+    periods = sorted(df[time_col].dropna().unique())
+    if len(periods) < 2:
+        return {"error": f"Need at least 2 periods, found {len(periods)}"}
+
+    if period_a is None and period_b is None:
+        pa, pb = periods[-2], periods[-1]
+    else:
+        pa = _match_period(period_a, periods) if period_a else periods[-2]
+        pb = _match_period(period_b, periods) if period_b else periods[-1]
+
+    df_a = df[df[time_col] == pa].copy()
+    df_b = df[df[time_col] == pb].copy()
+
+    if len(df_a) == 0 or len(df_b) == 0:
+        return {"error": f"No data for one of the periods: {pa}, {pb}"}
+
+    # ── Auto-detect pricing grain ───────────────────────────────────────
+    # Check if unit price varies by customer within the same product
+    customer_pricing = False
+    if customer_col and customer_col in df.columns:
+        df_a["_unit_price"] = df_a[revenue_col] / df_a[qty_col].replace(0, np.nan)
+        price_cv = df_a.groupby(product_col)["_unit_price"].apply(
+            lambda x: x.std() / x.mean() if x.mean() > 0 and len(x) > 1 else 0
+        )
+        # If >10% of products have CV > 1%, pricing is customer-specific
+        if (price_cv > 0.01).mean() > 0.1:
+            customer_pricing = True
+
+    # ── Build match key ─────────────────────────────────────────────────
+    if customer_pricing and customer_col:
+        key_cols = [product_col, customer_col]
+        grain_label = f"{product_col} x {customer_col}"
+    else:
+        key_cols = [product_col]
+        grain_label = product_col
+
+    def _make_key(row):
+        return tuple(str(row[c]) for c in key_cols) if len(key_cols) > 1 else str(row[key_cols[0]])
+
+    # ── Aggregate to grain level per period ─────────────────────────────
+    agg_cols = {qty_col: "sum", revenue_col: "sum"}
+    if cost_col and cost_col in df.columns:
+        agg_cols[cost_col] = "sum"
+    if margin_col and margin_col in df.columns:
+        agg_cols[margin_col] = "sum"
+
+    grp_a = df_a.groupby(key_cols, as_index=False).agg(agg_cols)
+    grp_b = df_b.groupby(key_cols, as_index=False).agg(agg_cols)
+
+    # Compute unit prices
+    grp_a["_unit_price"] = grp_a[revenue_col] / grp_a[qty_col].replace(0, np.nan)
+    grp_b["_unit_price"] = grp_b[revenue_col] / grp_b[qty_col].replace(0, np.nan)
+
+    if margin_col and margin_col in grp_a.columns:
+        grp_a["_unit_margin"] = grp_a[margin_col] / grp_a[qty_col].replace(0, np.nan)
+        grp_b["_unit_margin"] = grp_b[margin_col] / grp_b[qty_col].replace(0, np.nan)
+
+    # ── Match / New / Lost ──────────────────────────────────────────────
+    grp_a["_key"] = grp_a.apply(_make_key, axis=1)
+    grp_b["_key"] = grp_b.apply(_make_key, axis=1)
+
+    keys_a = set(grp_a["_key"])
+    keys_b = set(grp_b["_key"])
+    matched_keys = keys_a & keys_b
+    new_keys = keys_b - keys_a
+    lost_keys = keys_a - keys_b
+
+    matched_a = grp_a[grp_a["_key"].isin(matched_keys)].set_index("_key")
+    matched_b = grp_b[grp_b["_key"].isin(matched_keys)].set_index("_key")
+    new_rows = grp_b[grp_b["_key"].isin(new_keys)]
+    lost_rows = grp_a[grp_a["_key"].isin(lost_keys)]
+
+    # ── PVM decomposition (Laspeyres — base-period weights) ─────────────
+    # Align matched data
+    matched_b = matched_b.reindex(matched_a.index)
+
+    q_a = matched_a[qty_col].values
+    q_b = matched_b[qty_col].values
+    p_a = matched_a["_unit_price"].values
+    p_b = matched_b["_unit_price"].values
+
+    Q_a = q_a.sum()  # total base quantity
+    Q_b = q_b.sum()  # total current quantity
+
+    # Base-period mix weights
+    w_a = q_a / Q_a if Q_a > 0 else np.zeros_like(q_a)
+
+    # Weighted average base price (using base mix)
+    P_bar_a = float(np.sum(w_a * p_a))
+
+    # 1. Volume effect: change in total quantity × base weighted-avg price
+    volume_effect = float((Q_b - Q_a) * P_bar_a)
+
+    # 2. Price effect: Σ (price_change_i × base_qty_i)
+    price_effect = float(np.nansum((p_b - p_a) * q_a))
+
+    # 3. Mix effect = matched_revenue_change - volume - price
+    matched_rev_a = float(matched_a[revenue_col].sum())
+    matched_rev_b = float(matched_b[revenue_col].sum())
+    matched_change = matched_rev_b - matched_rev_a
+    mix_effect = matched_change - volume_effect - price_effect
+
+    # 4. New / Lost effects
+    new_effect = float(new_rows[revenue_col].sum()) if len(new_rows) > 0 else 0.0
+    lost_effect = float(-lost_rows[revenue_col].sum()) if len(lost_rows) > 0 else 0.0
+
+    total_rev_a = float(grp_a[revenue_col].sum())
+    total_rev_b = float(grp_b[revenue_col].sum())
+    total_change = total_rev_b - total_rev_a
+
+    # ── Per-product breakdown ───────────────────────────────────────────
+    # Build lookup dicts for safe access (avoids MultiIndex .loc issues with tuples)
+    _lookup_a = {k: i for i, k in enumerate(matched_a.index)}
+    _lookup_b = {k: i for i, k in enumerate(matched_b.index)}
+
+    product_details = []
+    for key in sorted(matched_keys):
+        idx_a = _lookup_a[key]
+        idx_b = _lookup_b[key]
+        qa_i = float(matched_a.iloc[idx_a][qty_col])
+        qb_i = float(matched_b.iloc[idx_b][qty_col])
+        pa_i = float(matched_a.iloc[idx_a]["_unit_price"])
+        pb_i = float(matched_b.iloc[idx_b]["_unit_price"])
+        rev_a_i = float(matched_a.iloc[idx_a][revenue_col])
+        rev_b_i = float(matched_b.iloc[idx_b][revenue_col])
+
+        price_i = (pb_i - pa_i) * qa_i
+        vol_share_a = qa_i / Q_a if Q_a > 0 else 0
+        vol_i = (Q_b - Q_a) * vol_share_a * pa_i
+        mix_i = (rev_b_i - rev_a_i) - price_i - vol_i
+
+        detail = {
+            "key": key if isinstance(key, str) else " | ".join(key) if isinstance(key, tuple) else str(key),
+            "qty_base": round(qa_i, 2),
+            "qty_current": round(qb_i, 2),
+            "unit_price_base": round(pa_i, 4),
+            "unit_price_current": round(pb_i, 4),
+            "price_change_pct": round((pb_i / pa_i - 1) * 100, 2) if pa_i > 0 else None,
+            "rev_base": round(rev_a_i, 2),
+            "rev_current": round(rev_b_i, 2),
+            "price_effect": round(price_i, 2),
+            "volume_effect": round(vol_i, 2),
+            "mix_effect": round(mix_i, 2),
+            "total_change": round(rev_b_i - rev_a_i, 2),
+        }
+        product_details.append(detail)
+
+    # Sort by absolute total change descending
+    product_details.sort(key=lambda x: abs(x["total_change"]), reverse=True)
+
+    # ── Margin PVM (if margin column available) ─────────────────────────
+    margin_pvm = None
+    if margin_col and margin_col in matched_a.columns:
+        m_a = matched_a["_unit_margin"].values
+        m_b = matched_b["_unit_margin"].values
+
+        M_bar_a = float(np.sum(w_a * m_a))
+        margin_volume = float((Q_b - Q_a) * M_bar_a)
+        margin_price = float(np.nansum((m_b - m_a) * q_a))
+        matched_margin_a = float(matched_a[margin_col].sum())
+        matched_margin_b = float(matched_b[margin_col].sum())
+        margin_mix = (matched_margin_b - matched_margin_a) - margin_volume - margin_price
+
+        new_margin = float(new_rows[margin_col].sum()) if (len(new_rows) > 0 and margin_col in new_rows.columns) else 0.0
+        lost_margin = float(-lost_rows[margin_col].sum()) if (len(lost_rows) > 0 and margin_col in lost_rows.columns) else 0.0
+        total_margin_a = float(grp_a[margin_col].sum())
+        total_margin_b = float(grp_b[margin_col].sum())
+
+        margin_pvm = {
+            "metric": margin_col,
+            "total_base": round(total_margin_a, 2),
+            "total_current": round(total_margin_b, 2),
+            "total_change": round(total_margin_b - total_margin_a, 2),
+            "volume_effect": round(margin_volume, 2),
+            "price_effect": round(margin_price, 2),
+            "mix_effect": round(margin_mix, 2),
+            "new_effect": round(new_margin, 2),
+            "lost_effect": round(lost_margin, 2),
+        }
+
+    # ── Dimensional drivers ─────────────────────────────────────────────
+    # Auto-detect categorical dimensions for driver analysis
+    if dimensions is None:
+        dimensions = []
+        for c in df.columns:
+            if c in (time_col, qty_col, revenue_col, cost_col, margin_col):
+                continue
+            if c in key_cols:
+                continue
+            if df[c].dtype == "object" and 1 < df[c].nunique() <= 50:
+                dimensions.append(c)
+
+    dim_drivers = {}
+    for dim in dimensions:
+        if dim not in df.columns:
+            continue
+        # Aggregate by dimension for each period
+        dim_a = df_a.groupby(dim).agg({revenue_col: "sum", qty_col: "sum"}).rename(
+            columns={revenue_col: "rev_base", qty_col: "qty_base"}
+        )
+        dim_b = df_b.groupby(dim).agg({revenue_col: "sum", qty_col: "sum"}).rename(
+            columns={revenue_col: "rev_current", qty_col: "qty_current"}
+        )
+        dim_merged = dim_a.join(dim_b, how="outer").fillna(0)
+        dim_merged["change"] = dim_merged["rev_current"] - dim_merged["rev_base"]
+        dim_merged["pct_of_total_change"] = (
+            (dim_merged["change"] / total_change * 100) if total_change != 0 else 0
+        )
+
+        segments = []
+        for idx_val, row in dim_merged.iterrows():
+            segments.append({
+                dim: str(idx_val),
+                "rev_base": round(float(row["rev_base"]), 2),
+                "rev_current": round(float(row["rev_current"]), 2),
+                "change": round(float(row["change"]), 2),
+                "pct_of_total_change": round(float(row["pct_of_total_change"]), 1),
+            })
+        segments.sort(key=lambda x: abs(x["change"]), reverse=True)
+        dim_drivers[dim] = segments
+
+    # ── New & lost product details ──────────────────────────────────────
+    def _format_key(k):
+        if isinstance(k, tuple):
+            return " | ".join(str(x) for x in k)
+        return str(k)
+
+    new_details = []
+    for _, row in new_rows.iterrows():
+        new_details.append({
+            "key": _format_key(row["_key"]),
+            "qty": round(float(row[qty_col]), 2),
+            "revenue": round(float(row[revenue_col]), 2),
+        })
+
+    lost_details = []
+    for _, row in lost_rows.iterrows():
+        lost_details.append({
+            "key": _format_key(row["_key"]),
+            "qty": round(float(row[qty_col]), 2),
+            "revenue": round(float(row[revenue_col]), 2),
+        })
+
+    # ── Assemble result ─────────────────────────────────────────────────
+    def _pct(val, total):
+        return round(val / total * 100, 1) if total != 0 else 0.0
+
+    result: dict[str, Any] = {
+        "analysis_type": "price_volume_mix",
+        "period_a": str(pa),
+        "period_b": str(pb),
+        "pricing_grain": grain_label,
+        "customer_level_pricing": customer_pricing,
+        "method": "Laspeyres (base-period weights)",
+        "matched_pairs": len(matched_keys),
+        "new_pairs": len(new_keys),
+        "lost_pairs": len(lost_keys),
+        "aggregate": {
+            "revenue_base": round(total_rev_a, 2),
+            "revenue_current": round(total_rev_b, 2),
+            "total_change": round(total_change, 2),
+            "total_change_pct": round((total_rev_b / total_rev_a - 1) * 100, 2) if total_rev_a > 0 else None,
+            "volume_effect": round(volume_effect, 2),
+            "volume_pct": _pct(volume_effect, total_change),
+            "price_effect": round(price_effect, 2),
+            "price_pct": _pct(price_effect, total_change),
+            "mix_effect": round(mix_effect, 2),
+            "mix_pct": _pct(mix_effect, total_change),
+            "new_effect": round(new_effect, 2),
+            "new_pct": _pct(new_effect, total_change),
+            "lost_effect": round(lost_effect, 2),
+            "lost_pct": _pct(lost_effect, total_change),
+            "direction": "increased" if total_change > 0 else "decreased" if total_change < 0 else "unchanged",
+        },
+        "qty_summary": {
+            "total_base": round(float(Q_a), 2),
+            "total_current": round(float(Q_b), 2),
+            "change": round(float(Q_b - Q_a), 2),
+            "change_pct": round((Q_b / Q_a - 1) * 100, 2) if Q_a > 0 else None,
+        },
+        "avg_unit_price": {
+            "base": round(P_bar_a, 4),
+            "current": round(float(np.sum(q_b / Q_b * p_b)) if Q_b > 0 else 0, 4),
+        },
+        "product_detail": product_details,
+        "new_products": new_details,
+        "lost_products": lost_details,
+        "dimensional_drivers": dim_drivers,
+    }
+
+    if margin_pvm:
+        result["margin_pvm"] = margin_pvm
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 8. period_comparison (entity-level diff between two time periods)
 # ---------------------------------------------------------------------------
 
 def period_comparison(

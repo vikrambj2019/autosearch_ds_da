@@ -498,62 +498,97 @@ async def run_code_handler(args: dict[str, Any]) -> dict[str, Any]:
 # 3. validate_cols
 # ---------------------------------------------------------------------------
 
-def _fuzzy_match_column(user_ref: str, actual_cols: list[str]) -> tuple[str | None, float]:
-    """Match a user column reference to actual column names.
+import os
+import anthropic as _anthropic
 
-    Returns (best_match, confidence 0-1).
-    """
-    user_ref_upper = user_ref.strip().upper().replace(" ", "_")
-    user_tokens = set(user_ref_upper.replace("_", " ").split())
+_anthropic_client = _anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
+_VALIDATE_MODEL = "claude-sonnet-4-6"
 
-    best_match = None
-    best_score = 0.0
 
-    for col in actual_cols:
-        col_upper = col.upper()
-        col_tokens = set(col_upper.replace("_", " ").split())
+async def _llm_match_columns(
+    user_refs: list[str], actual_cols: list[str]
+) -> tuple[dict, list]:
+    """Use a single LLM call (anthropic SDK) to resolve user column references to actual names."""
+    prompt = f"""Match each user column reference to the BEST actual column name from the list.
+Return ONLY valid JSON — no markdown, no explanation.
 
-        # Exact match
-        if user_ref_upper == col_upper:
-            return col, 1.0
+Actual columns: {json.dumps(actual_cols)}
 
-        score = 0.0
+User references: {json.dumps(user_refs)}
 
-        # Substring match: user_ref is contained in column name
-        if user_ref_upper in col_upper:
-            score = max(score, 0.8)
+Return JSON: {{"matches": {{"<user_ref>": {{"column": "<actual_col>", "confidence": 0.0-1.0}}, ...}}, "unmatched": ["<ref>", ...]}}
 
-        # Column name is contained in user_ref
-        if col_upper in user_ref_upper:
-            score = max(score, 0.7)
+Rules:
+- Only match to columns that exist in the actual columns list
+- confidence: 1.0 = exact match, 0.8+ = clear synonym, 0.5-0.8 = likely match
+- If no reasonable match exists, put the ref in "unmatched"
+"""
+    response = _anthropic_client.messages.create(
+        model=_VALIDATE_MODEL,
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    response_text = "".join(
+        block.text for block in response.content if block.type == "text"
+    )
 
-        # Token overlap
-        if user_tokens and col_tokens:
-            overlap = len(user_tokens & col_tokens)
-            token_score = overlap / max(len(user_tokens), len(col_tokens))
-            score = max(score, token_score * 0.9)
+    # Parse JSON from response (handle markdown fencing)
+    text = response_text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    parsed = json.loads(text)
 
-        # Abbreviation handling
-        abbrevs = {
-            "AVG": "AVG", "ER": "ER", "COST": "COST", "TOTAL": "TOTAL",
-            "MONTHLY": "MONTHLY", "INCOME": "INCOME", "ACTIVE": "ACTIVE",
-            "COUNTY": "COUNTY", "CITY": "CITY", "STATE": "STATE",
-            "SEX": "SEX", "GENDER": "SEX", "MEMBER": "MEMBER",
-            "DATE": "DATE", "MONTH": "MONTH", "YEAR": "YEAR",
-        }
-        for abbr, expanded in abbrevs.items():
-            if abbr in user_ref_upper and expanded in col_upper:
-                score = max(score, 0.6)
+    # Validate: ensure all matched columns actually exist
+    matches = {}
+    unmatched = list(parsed.get("unmatched", []))
+    for ref, match_info in parsed.get("matches", {}).items():
+        col = match_info.get("column", "")
+        if col in actual_cols:
+            matches[ref] = match_info
+        else:
+            unmatched.append(ref)
 
-        if score > best_score:
-            best_score = score
-            best_match = col
+    return matches, unmatched
 
-    return best_match, best_score
+
+def _simple_match_columns(
+    user_refs: list[str], actual_cols: list[str]
+) -> tuple[dict, list]:
+    """Fallback: exact and case-insensitive substring matching. No hardcoded abbreviations."""
+    matches = {}
+    unmatched = []
+    cols_lower = {c.lower(): c for c in actual_cols}
+
+    for ref in user_refs:
+        ref_clean = ref.strip().lower().replace(" ", "_")
+
+        # Exact (case-insensitive)
+        if ref_clean in cols_lower:
+            matches[ref] = {"column": cols_lower[ref_clean], "confidence": 1.0}
+            continue
+
+        # Substring: user ref contained in a column name
+        found = None
+        for col_low, col_orig in cols_lower.items():
+            if ref_clean in col_low:
+                found = col_orig
+                break
+        if found:
+            matches[ref] = {"column": found, "confidence": 0.7}
+            continue
+
+        unmatched.append(ref)
+
+    return matches, unmatched
 
 
 async def validate_cols_handler(args: dict[str, Any]) -> dict[str, Any]:
-    """Fuzzy-match user column references to actual column names."""
+    """Resolve user column references to actual column names using an LLM.
+
+    No hardcoded abbreviation dictionaries — the LLM natively understands
+    synonyms across any dataset (e.g., 'gender' → 'SEX', 'cost' → 'monthly_cost').
+    Falls back to exact/substring matching if the LLM call fails.
+    """
     data_path = args["data_path"]
     user_columns_str = args["user_columns"]
 
@@ -565,25 +600,16 @@ async def validate_cols_handler(args: dict[str, Any]) -> dict[str, Any]:
     actual_cols = list(df.columns)
     user_refs = [c.strip() for c in user_columns_str.split(",") if c.strip()]
 
-    matches = {}
-    unmatched = []
-    suggestions = {}
-
-    for ref in user_refs:
-        match, confidence = _fuzzy_match_column(ref, actual_cols)
-        if match and confidence >= 0.5:
-            matches[ref] = {"column": match, "confidence": round(confidence, 2)}
-        else:
-            unmatched.append(ref)
-            # Find top 3 closest for suggestions
-            scored = [(col, _fuzzy_match_column(ref, [col])[1]) for col in actual_cols]
-            scored.sort(key=lambda x: x[1], reverse=True)
-            suggestions[ref] = [col for col, _ in scored[:3]]
+    # Try LLM-based resolution first
+    try:
+        matches, unmatched = await _llm_match_columns(user_refs, actual_cols)
+    except Exception:
+        # Fallback: exact and substring matching (no hardcoded abbreviations)
+        matches, unmatched = _simple_match_columns(user_refs, actual_cols)
 
     result = {
         "matches": matches,
         "unmatched": unmatched,
-        "suggestions": suggestions,
         "all_columns": actual_cols,
     }
 

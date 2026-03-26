@@ -45,7 +45,10 @@ from tools.analytics import (
     group_comparison,
     correlation_analysis,
     summary_stats,
+    normality_test,
+    entity_lookup,
     entity_counts,
+    price_volume_mix,
     period_comparison,
 )
 
@@ -70,7 +73,10 @@ You are a parameter extractor for a data analytics system. Given a user question
 - **comparison**: Statistical comparison between groups (e.g., "difference in cost between male and female", "is X higher for group A vs B")
 - **correlation**: Relationship between two numeric metrics (e.g., "correlation between cost and income")
 - **summary**: Descriptive statistics for a metric (e.g., "summary of cost", "percentiles", "p90")
+- **normality**: Test whether a column follows a normal distribution (e.g., "is X normally distributed?", "normality test on column Y", "does the distribution adhere to normal")
+- **lookup**: Find which entity has the highest/lowest value (e.g., "which country has the highest happiness score?", "which field has the most graduates?", "find the site with the highest value"). Use when the question asks "which X has the highest/lowest Y".
 - **entity_counts**: Count of unique entities (e.g., "how many members", "count of patients")
+- **pvm**: Price-Volume-Mix decomposition of revenue or margin change between two periods (e.g., "why did revenue change?", "price volume mix analysis", "what drove the margin change?", "decompose the revenue change into price, volume, and mix"). Use when the question asks about decomposing revenue/margin changes into price, volume, and mix components. Requires qty and revenue columns.
 - **period_comparison**: Entity-level comparison between two time periods (e.g., "compare July vs September", "what changed between months", "which members drove the cost increase"). Only for panel data with a time column.
 
 ## Rules
@@ -80,9 +86,32 @@ You are a parameter extractor for a data analytics system. Given a user question
 - **period_a**: Only for period_comparison — must be an EXACT value from the provided `time_periods` list. Match the user's reference (e.g., "July" → "2025-07-01") to the closest period in the list. Null if user doesn't specify.
 - **period_b**: Only for period_comparison — must be an EXACT value from the provided `time_periods` list. Null if user doesn't specify.
 - **stratify_by**: Only for period_comparison or trend — categorical column to segment the analysis. Null if not specified.
-- **analysis_type**: One of the 7 types above. Use the skill_name hint if provided (diagnostic → comparison or correlation). Use period_comparison when the user asks to compare between specific time periods, or asks "what changed" between months.
+- **group_by**: Column(s) to compute the metric SEPARATELY for each group. Can be a single column name (string) or a list of column names for multi-level grouping. Use when the question asks "for each class", "per month", "by gender and class", "for male vs female passengers in each class", "as a function of X", "by income level". Must be EXACT column name(s) or null. Works with both categorical AND numeric columns — numeric columns are auto-binned into quartiles. Different from category: group_by runs the FULL analysis separately per group, while category is the breakdown dimension of a single analysis.
+- **filters**: List of filter conditions to apply BEFORE analysis. Use when the question restricts the data subset: "for female passengers", "who survived", "in first class", "with a fare greater than X", "male passengers who survived and were in first class". IMPORTANT: extract ALL conditions as separate filters — multiple filters are AND-combined. Each filter: {"column": "exact_col_name", "op": "==|!=|>|>=|<|<=|in|not_in|contains", "value": ...}. Null if no filtering needed.
+- **lookup_mode**: Only for lookup analysis — "max" (default) or "min". Use "max" for "highest", "most", "largest", "best". Use "min" for "lowest", "least", "smallest", "worst".
+- **qty_col**: Only for pvm analysis — the column containing quantities. Must be exact column name or null (auto-detected from "qty", "quantity", "units", "volume").
+- **revenue_col**: Only for pvm analysis — the column containing revenue. Must be exact column name or null (auto-detected from "rev", "revenue", "sales", "amount").
+- **product_col**: Only for pvm analysis — the column containing product/SKU identifiers. Must be exact column name or null (auto-detected from "product_sku", "sku", "product").
+- **customer_col**: Only for pvm analysis — the column containing customer IDs. Must be exact column name or null.
+- **cost_col**: Only for pvm analysis — the column containing costs. Null if not available.
+- **margin_col**: Only for pvm analysis — the column containing margins. Null if not available.
+- **analysis_type**: One of the 10 types above. Use the skill_name hint if provided (diagnostic → comparison or correlation). Use period_comparison when the user asks to compare between specific time periods, or asks "what changed" between months. Use **normality** when the user asks if data is "normally distributed", "follows a normal distribution", or "adheres to normal". Use **lookup** when the question asks "which X has the highest/lowest Y". Use **pvm** when the question asks about price/volume/mix decomposition or why revenue/margin changed.
 - If the user mentions values like "male/female" or "active/inactive", find which column contains those values.
 - Return ONLY valid JSON, no markdown fences, no explanation.
+
+## Examples
+
+Q: "What is the average age of male passengers in each passenger class?"
+→ {"analysis_type": "summary", "metric": "Age", "filters": [{"column": "Sex", "op": "==", "value": "male"}], "group_by": "Pclass"}
+
+Q: "Calculate the correlation between age and fare for passengers who survived and were in first class"
+→ {"analysis_type": "correlation", "metric": "Age", "metric_b": "Fare", "filters": [{"column": "Survived", "op": "==", "value": 1}, {"column": "Pclass", "op": "==", "value": 1}]}
+
+Q: "Which country has the highest happiness score?"
+→ {"analysis_type": "lookup", "metric": "Happiness Score", "category": "Country", "lookup_mode": "max"}
+
+Q: "Why did revenue change between January and February? Price volume mix analysis"
+→ {"analysis_type": "pvm", "metric": "rev", "revenue_col": "rev", "qty_col": "qty", "product_col": "product_sku", "customer_col": "customer_id", "cost_col": "cost", "margin_col": "margin", "period_a": "2025-01-01", "period_b": "2025-02-01"}
 """
 
 
@@ -151,9 +180,18 @@ async def _extract_params(
         # Validate: all returned columns must actually exist
         result = {}
         result["analysis_type"] = parsed.get("analysis_type", "distribution")
-        valid_types = ("distribution", "trend", "comparison", "correlation", "summary", "entity_counts", "period_comparison")
+        valid_types = ("distribution", "trend", "comparison", "correlation", "summary", "normality", "lookup", "entity_counts", "pvm", "period_comparison")
         if result["analysis_type"] not in valid_types:
             result["analysis_type"] = "distribution"
+
+        # lookup fields
+        lm = parsed.get("lookup_mode", "max")
+        result["lookup_mode"] = lm if lm in ("max", "min") else "max"
+
+        # pvm fields
+        for pvm_field in ("qty_col", "revenue_col", "product_col", "customer_col", "cost_col", "margin_col"):
+            val = parsed.get(pvm_field)
+            result[pvm_field] = val if val in columns else None
 
         m = parsed.get("metric")
         result["metric"] = m if m in columns else (numeric_cols[0] if numeric_cols else columns[0])
@@ -169,6 +207,22 @@ async def _extract_params(
         result["period_b"] = parsed.get("period_b")
         sb = parsed.get("stratify_by")
         result["stratify_by"] = sb if sb in columns else None
+
+        # group_by: validate column(s) exist — can be string or list
+        gb = parsed.get("group_by")
+        if isinstance(gb, list):
+            gb = [col for col in gb if col in columns]
+            result["group_by"] = gb if gb else None
+        else:
+            result["group_by"] = gb if gb in columns else None
+
+        # filters: validate each filter's column exists
+        raw_filters = parsed.get("filters")
+        if raw_filters and isinstance(raw_filters, list):
+            valid_filters = [f for f in raw_filters if isinstance(f, dict) and f.get("column") in columns]
+            result["filters"] = valid_filters if valid_filters else None
+        else:
+            result["filters"] = None
 
         return result
 
@@ -214,6 +268,12 @@ def _extract_params_fallback(
     # Analysis type: keyword matching
     if skill_name == "diagnostic":
         analysis_type = "correlation" if "correlat" in q_lower else "comparison"
+    elif any(w in q_lower for w in ("price volume mix", "pvm", "price effect", "volume effect", "mix effect", "decompose revenue", "decompose margin")):
+        analysis_type = "pvm"
+    elif any(w in q_lower for w in ("normally distributed", "normal distribution", "normality", "adheres to normal")):
+        analysis_type = "normality"
+    elif any(w in q_lower for w in ("which", "highest", "lowest", "most", "least")) and any(w in q_lower for w in ("has the", "with the", "find the")):
+        analysis_type = "lookup"
     elif any(w in q_lower for w in ("distribution", "breakdown")):
         analysis_type = "distribution"
     elif any(w in q_lower for w in ("trend", "over time")):
@@ -251,6 +311,15 @@ def _extract_params_fallback(
         "period_a": None,
         "period_b": None,
         "stratify_by": None,
+        "group_by": None,
+        "filters": None,
+        "lookup_mode": "max",
+        "qty_col": None,
+        "revenue_col": None,
+        "product_col": None,
+        "customer_col": None,
+        "cost_col": None,
+        "margin_col": None,
     }
 
 
@@ -262,14 +331,24 @@ def _run_primary(params: dict, df, verbose: bool = True) -> dict:
     analysis_type = params["analysis_type"]
     metric = params["metric"]
     category = params.get("category")
+    filters = params.get("filters")
+    group_by = params.get("group_by")
 
     if verbose:
-        print(f"\nPass 1 — {analysis_type}({metric}" + (f", {category})" if category else ")"))
+        extra = []
+        if category:
+            extra.append(f"cat={category}")
+        if group_by:
+            extra.append(f"group_by={group_by}")
+        if filters:
+            extra.append(f"filters={len(filters)}")
+        suffix = f", {', '.join(extra)}" if extra else ""
+        print(f"\nPass 1 — {analysis_type}({metric}{suffix})")
 
     if analysis_type == "distribution":
         if not category:
-            return summary_stats(df, metric)
-        return distribution_by_category(df, metric, category)
+            return summary_stats(df, metric, filters=filters, group_by=group_by)
+        return distribution_by_category(df, metric, category, filters=filters)
 
     elif analysis_type == "trend":
         return trend_over_time(df, metric, stratify_by=category)
@@ -277,19 +356,65 @@ def _run_primary(params: dict, df, verbose: bool = True) -> dict:
     elif analysis_type == "comparison":
         if not category:
             return {"error": "No group column found for comparison"}
-        return group_comparison(df, metric, category)
+        return group_comparison(df, metric, category, filters=filters)
 
     elif analysis_type == "correlation":
         metric_b = params.get("metric_b")
         if not metric_b:
             return {"error": "Need two metrics for correlation"}
-        return correlation_analysis(df, metric, metric_b)
+        return correlation_analysis(df, metric, metric_b, filters=filters, group_by=group_by)
 
     elif analysis_type == "summary":
-        return summary_stats(df, metric)
+        return summary_stats(df, metric, filters=filters, group_by=group_by)
+
+    elif analysis_type == "normality":
+        return normality_test(df, metric, group_col=group_by or category, filters=filters)
+
+    elif analysis_type == "lookup":
+        if not category:
+            # Auto-pick: first categorical column that isn't the metric
+            for c in df.columns:
+                if c != metric and df[c].dtype == "object":
+                    category = c
+                    break
+        if not category:
+            return {"error": "No category column found for lookup"}
+        return entity_lookup(df, metric, category, mode=params.get("lookup_mode", "max"), filters=filters)
 
     elif analysis_type == "entity_counts":
         return entity_counts(df, group_col=category)
+
+    elif analysis_type == "pvm":
+        # Auto-detect column names if not extracted
+        def _find_col(candidates, cols):
+            for cand in candidates:
+                for col in cols:
+                    if cand.lower() == col.lower():
+                        return col
+            return None
+
+        rev_col = params.get("revenue_col") or _find_col(["rev", "revenue", "sales", "amount"], df.columns)
+        q_col = params.get("qty_col") or _find_col(["qty", "quantity", "units", "volume"], df.columns)
+        prod_col = params.get("product_col") or _find_col(["product_sku", "sku", "product", "item"], df.columns)
+        cust_col = params.get("customer_col") or _find_col(["customer_id", "customer", "cust_id", "account"], df.columns)
+        cost_c = params.get("cost_col") or _find_col(["cost", "cogs"], df.columns)
+        margin_c = params.get("margin_col") or _find_col(["margin", "profit", "gross_margin"], df.columns)
+
+        if not rev_col or not q_col or not prod_col:
+            return {"error": f"PVM requires revenue, qty, and product columns. Found: rev={rev_col}, qty={q_col}, product={prod_col}"}
+
+        return price_volume_mix(
+            df,
+            revenue_col=rev_col,
+            qty_col=q_col,
+            product_col=prod_col,
+            customer_col=cust_col,
+            period_a=params.get("period_a"),
+            period_b=params.get("period_b"),
+            cost_col=cost_c,
+            margin_col=margin_c,
+            filters=filters,
+        )
 
     elif analysis_type == "period_comparison":
         return period_comparison(
@@ -300,7 +425,7 @@ def _run_primary(params: dict, df, verbose: bool = True) -> dict:
         )
 
     else:
-        return summary_stats(df, metric)
+        return summary_stats(df, metric, filters=filters, group_by=group_by)
 
 
 # ── Pass 2: Depth Analyses ──────────────────────────────────────────────────

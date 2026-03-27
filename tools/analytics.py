@@ -1285,15 +1285,22 @@ def price_volume_mix(
 
     # ── Detect time column and resolve periods ──────────────────────────
     if time_col is None:
-        # Auto-detect: first date-like column
+        # Auto-detect: date-like column names first, then integer year columns
+        time_keywords = ("date", "period", "month", "year", "time")
         for c in df.columns:
-            if "date" in c.lower() or "period" in c.lower() or "month" in c.lower():
+            if any(kw in c.lower() for kw in time_keywords):
                 time_col = c
                 break
         if time_col is None:
             return {"error": "No time/date column detected. Pass time_col explicitly."}
 
-    if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
+    # Keep integer year columns as-is (don't convert 2025/2026 via pd.to_datetime
+    # which would interpret them as nanoseconds from epoch)
+    col_is_int_year = (
+        pd.api.types.is_integer_dtype(df[time_col])
+        and df[time_col].dropna().between(1900, 2100).all()
+    )
+    if not col_is_int_year and not pd.api.types.is_datetime64_any_dtype(df[time_col]):
         df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
 
     periods = sorted(df[time_col].dropna().unique())

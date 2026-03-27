@@ -409,6 +409,7 @@ def _run_primary(params: dict, df, verbose: bool = True) -> dict:
             qty_col=q_col,
             product_col=prod_col,
             customer_col=cust_col,
+            time_col=params.get("_time_col"),
             period_a=params.get("period_a"),
             period_b=params.get("period_b"),
             cost_col=cost_c,
@@ -1162,6 +1163,7 @@ async def run_question(
         print(f"\nExtracted: {json.dumps(params, indent=2)}")
 
     # 6. Pass 1 — Primary analysis (deterministic)
+    params["_time_col"] = grain.get("time_col")
     primary = _run_primary(params, df, verbose)
     if verbose:
         # Print key headline from primary result

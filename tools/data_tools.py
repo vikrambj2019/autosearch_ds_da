@@ -146,6 +146,11 @@ def _detect_grain(df: pd.DataFrame) -> dict[str, Any]:
                 pass
         elif pd.api.types.is_datetime64_any_dtype(df[col]):
             score += 2.5
+        elif pd.api.types.is_integer_dtype(df[col]):
+            # Integer column with year-range values (e.g. 2012, 2013) is a strong time signal
+            vals = df[col].dropna()
+            if len(vals) > 0 and vals.between(1900, 2100).all():
+                score += 2.5
 
         if score > 0:
             time_scores.append((col, score))
